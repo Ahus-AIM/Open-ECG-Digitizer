@@ -11,16 +11,19 @@ class InferenceWrapper(torch.nn.Module):
         device: str,
         resample_size: None | Tuple[int] = None,
         signal_class: int = 2,
+        background_class: int = 0,
     ) -> None:
         super(InferenceWrapper, self).__init__()
         self.config = config
         self.device = device
         self.resample_size = resample_size
         self.signal_class = signal_class
+        self.background_class = background_class
         self.snake = self._load_snake()
         self.perspective_detector = self._load_perspective_detector()
         self.segmentation_model = self._load_segmentation_model().to(self.device)
         self.cropper = self._load_cropper()
+        self.pixel_size_finder = self._load_pixel_size_finder()
 
     @torch.no_grad()
     def forward(self, image: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -31,36 +34,46 @@ class InferenceWrapper(torch.nn.Module):
         if self.resample_size is not None:
             image = torch.nn.functional.interpolate(image, size=self.resample_size)
 
-        signal_probabilities = self.segment_signal(image)
+        signal_probabilities, background_probabilities = self.segment_signal_and_background(image)
         alignment_params = self.perspective_detector(image)
 
         source_points = self.cropper(signal_probabilities, alignment_params)
 
         mean_image_color = image.mean(dim=(0, 2, 3))
         aligned_signal_probabilities = self.cropper.apply_perspective(signal_probabilities, source_points, fill_value=0)
+        aligned_background_probabilities = self.cropper.apply_perspective(
+            background_probabilities, source_points, fill_value=1
+        )
         aligned_image = self.cropper.apply_perspective(image, source_points, fill_value=mean_image_color.tolist())
+        mean_background = mean_image_color.repeat(aligned_image.shape[-2], aligned_image.shape[-1], 1).permute(2, 0, 1)
+        aligned_background = (
+            aligned_background_probabilities * aligned_image + (1 - aligned_background_probabilities) * mean_background
+        )
 
-        # TODO: unit detection
+        mm_per_pixel_x, mm_per_pixel_y = self.pixel_size_finder(aligned_background)
 
         self.snake.fit(aligned_signal_probabilities.squeeze().cpu())
 
-        out_dict = {
+        return {
             "image": image.cpu(),
             "image_aligned": aligned_image.cpu(),
             "signal_probabilities_aligned": aligned_signal_probabilities.cpu(),
             "snake": self.snake.snake.data.detach(),
+            "mm_per_pixel_x": mm_per_pixel_x,
+            "mm_per_pixel_y": mm_per_pixel_y,
         }
-        return out_dict
 
     def resample(self, image: torch.Tensor) -> torch.Tensor:
         if self.resample_size is not None:
             image = torch.nn.functional.interpolate(image, size=self.resample_size)
         return image
 
-    def segment_signal(self, image: torch.Tensor) -> torch.Tensor:
+    def segment_signal_and_background(self, image: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         logits = self.segmentation_model(image)
         probabilities = torch.softmax(logits, dim=1)
-        return probabilities[:, self.signal_class : self.signal_class + 1, :, :]
+        signal_prob = probabilities[:, self.signal_class : self.signal_class + 1, :, :]
+        background_prob = probabilities[:, self.background_class : self.background_class + 1, :, :]
+        return signal_prob, background_prob
 
     def min_max_normalize(self, image: torch.Tensor) -> torch.Tensor:
         return (image - image.min()) / (image.max() - image.min())
@@ -85,6 +98,11 @@ class InferenceWrapper(torch.nn.Module):
         cropper_class = import_class_from_path(self.config.CROPPER.class_path)
         cropper: torch.nn.Module = cropper_class(**self.config.CROPPER.KWARGS)
         return cropper
+
+    def _load_pixel_size_finder(self) -> torch.nn.Module:
+        pixel_size_finder_class = import_class_from_path(self.config.PIXEL_SIZE_FINDER.class_path)
+        pixel_size_finder: torch.nn.Module = pixel_size_finder_class(**self.config.PIXEL_SIZE_FINDER.KWARGS)
+        return pixel_size_finder
 
     def _load_segmentation_model_weights(self, segmentation_model: torch.nn.Module) -> None:
         checkpoint = torch.load(

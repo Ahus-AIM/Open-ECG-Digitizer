@@ -26,6 +26,10 @@ MODEL:
         KWARGS:
           granularity: 200
           percentiles: [0.01, 0.99]
+
+      PIXEL_SIZE_FINDER:
+        class_path: 'src.model.pixel_size_finder.PixelSizeFinder'
+        KWARGS: {}
     device: 'cpu'
 
 DATA:
