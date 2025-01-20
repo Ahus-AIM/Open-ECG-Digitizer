@@ -36,8 +36,9 @@ class InferenceWrapper(torch.nn.Module):
 
         source_points = self.cropper(signal_probabilities, alignment_params)
 
+        mean_image_color = image.mean(dim=(0, 2, 3))
         aligned_signal_probabilities = self.cropper.apply_perspective(signal_probabilities, source_points, fill_value=0)
-        aligned_image = self.cropper.apply_perspective(image, source_points, fill_value=image.mean().item())
+        aligned_image = self.cropper.apply_perspective(image, source_points, fill_value=mean_image_color.tolist())
 
         # TODO: unit detection
 
