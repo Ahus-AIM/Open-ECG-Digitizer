@@ -9,7 +9,7 @@ from tqdm import tqdm
 from yacs.config import CfgNode as CN
 
 from src.config.default import get_cfg
-from src.utils import import_class_from_path
+from src.utils import load_model
 
 
 def load_file_paths_with_structure(config: CN) -> Iterable[str]:
@@ -47,8 +47,7 @@ def adjust_image_shape(image: torch.Tensor) -> torch.Tensor:
 
 
 def main(config: CN) -> None:
-    inference_wrapper_class = import_class_from_path(config.MODEL.class_path)
-    inference_wrapper = inference_wrapper_class(**config.MODEL.KWARGS)
+    inference_wrapper = load_model(config)
 
     loading_bar = tqdm(load_file_paths_with_structure(config))
     if config.DATA.get("output_path") is not None:
