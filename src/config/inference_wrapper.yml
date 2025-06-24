@@ -23,7 +23,8 @@ MODEL:
 
       SEGMENTATION_MODEL:
         class_path: 'src.model.unet.UNet'
-        weight_path: 'sandbox/weights_25.pt'
+        weight_path: '../../sandbox/weights_25.pt'
+        #weight_path: 'sandbox/weights_25.pt'
         KWARGS:
           num_in_channels: 3
           num_out_channels: 4
@@ -48,4 +49,5 @@ MODEL:
 DATA:
   images_path: '/dataset/pmcardio_ecg_image_dataset/visual_data/'
   image_extensions: ['.png', '.jpg', 'jpeg']
-  output_path: 'sandbox/inference_output'
+  output_path: '../../sandbox/inference_output'
+  #output_path: 'sandbox/inference_output'
