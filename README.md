@@ -1,6 +1,6 @@
 # Open ECG Digitizer
 
-![Tests](https://github.com/Ahus-AIM/Electrocardiogram-Digitization/actions/workflows/test.yml/badge.svg?branch=main) ![](https://img.shields.io/badge/%20style-google-3666d6.svg) [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-31211/)
+[![arXiv](https://img.shields.io/badge/arXiv-2510.19590-00cc66.svg)](https://arxiv.org/abs/2510.19590) ![Tests](https://github.com/Ahus-AIM/Electrocardiogram-Digitization/actions/workflows/test.yml/badge.svg?branch=main) ![](https://img.shields.io/badge/%20style-google-3666d6.svg) [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-31211/)
 
 This repository provides a highly configurable tool for digitizing 12-lead ECGs, extracting raw time series data from scanned images or photographs (e.g., taken with a phone). It supports any subset of the 12 standard leads and is robust to perspective distortions and image quality variations.
 
@@ -68,3 +68,14 @@ Below is an overview of their purpose and debugging relevance, in approximate ex
 1. Change `data_path` for TRAIN, VAL and TEST in [src/config/unet.yml](src/config/unet.yml) to the locations of the custom dataset.
 2. Run: ```python3 -m src.train```
 
+## Mandatory Citation
+
+If you use this code or dataset in your research, **please cite the following paper**:
+```bibtex
+@misc{stenhede_digitizing_2025,
+  title        = {Digitizing Paper {ECGs} at Scale: An Open-Source Algorithm for Clinical Research},
+  author       = {Stenhede, Elias and Bjørnstad, Agnar Martin and Ranjbar, Arian},
+  year         = {2025},
+  doi          = {10.48550/ARXIV.2510.19590},
+  shorttitle   = {Digitizing Paper {ECGs} at Scale}
+}
