@@ -63,6 +63,18 @@ Below is an overview of their purpose and debugging relevance, in approximate ex
 > [!NOTE]
 > The output values are expressed in **microvolts (µV)**.
 
+## Training dataset
+The dataset is publicly available on Hugging Face:
+[huggingface.co/datasets/Ahus-AIM/Open-ECG-Digitizer-Development-Dataset](https://huggingface.co/datasets/Ahus-AIM/Open-ECG-Digitizer-Development-Dataset)
+
+### Dataset characteristics
+- Multiple grid types, colors and sizes
+- Perspective distortions, varying illumination, and noise
+- Pixel-level annotations for ECG traces, grid, and background
+
+The dataset is intended to support:
+- Retraining or fine-tuning of the segmentation network
+- Development of alternative ECG digitization approaches
 
 ## Train on custom dataset
 1. Change `data_path` for TRAIN, VAL and TEST in [src/config/unet.yml](src/config/unet.yml) to the locations of the custom dataset.
@@ -72,10 +84,13 @@ Below is an overview of their purpose and debugging relevance, in approximate ex
 
 If you use this code or dataset in your research, **please cite the following paper**:
 ```bibtex
-@misc{stenhede_digitizing_2025,
+@article{stenhede_digitizing_2026,
   title        = {Digitizing Paper {ECGs} at Scale: An Open-Source Algorithm for Clinical Research},
   author       = {Stenhede, Elias and Bjørnstad, Agnar Martin and Ranjbar, Arian},
-  year         = {2025},
-  doi          = {10.48550/ARXIV.2510.19590},
+  journal      = {npj Digital Medicine},
+  year         = {2026},
+  doi          = {10.1038/s41746-025-02327-1},
+  url          = {https://doi.org/10.1038/s41746-025-02327-1},
   shorttitle   = {Digitizing Paper {ECGs} at Scale}
 }
+
