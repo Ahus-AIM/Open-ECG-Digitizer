@@ -6,3 +6,15 @@ venv
 src/scripts/visualized_transforms
 src/report/figures
 sandbox/
+
+# Local artifacts and large generated outputs
+DIGITIZED
+deploy/
+docs/
+logs/
+scripts/
+weights/
+
+# Local experiment configs
+src/config/inference_wrapper_multilayout.yml
+src/config/lead_layouts_deepecg.yml
