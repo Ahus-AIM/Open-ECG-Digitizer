@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 import torch
-from torchvision.io import decode_image
+from torchvision.io import read_image, ImageReadMode
 from tqdm import tqdm
 from yacs.config import CfgNode as CN
 
@@ -51,7 +51,7 @@ def copy_file_structure(src: str, dst: str) -> None:
 
 
 def decode_and_prepare_image(file_path: str) -> torch.Tensor:
-    image: torch.Tensor = decode_image(file_path, mode="RGB")
+    image: torch.Tensor = read_image(file_path, mode=ImageReadMode.RGB)
     C, H, W = image.shape
     if C == 1:
         image = image.expand(3, H, W)

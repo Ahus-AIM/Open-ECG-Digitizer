@@ -12,9 +12,7 @@ DIGITIZED
 deploy/
 docs/
 logs/
-scripts/
 weights/
 
 # Local experiment configs
 src/config/inference_wrapper_multilayout.yml
-src/config/lead_layouts_deepecg.yml

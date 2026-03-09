@@ -1,0 +1,11 @@
+standard_3x4_with_r1:
+  description: "3×4 standard layout with lead II as rhythm lead"
+  layout:
+    rows: 3
+    cols: 4
+  leads:
+    - ["I", "aVR", "V1", "V4"]
+    - ["II", "aVL", "V2", "V5"]
+    - ["III", "aVF", "V3", "V6"]
+  rhythm_leads: ["Any"]
+  total_rows: 4
