@@ -74,15 +74,14 @@ def export_unet(weights_path: str, out_name: str = "unet_multilayout"):
 
 
 def export_layout_classifier(weights_path: str, out_name: str = "layout_classifier"):
-    """Export layout classifier (ResNet-18) to ONNX."""
-    from torchvision import models as tv_models
+    """Export layout+orientation classifier (dual-head ResNet-18) to ONNX."""
+    from scripts.train_layout_classifier import LayoutOrientModel
 
     print(f"\n{'='*60}")
-    print(f"Exporting Layout Classifier: {weights_path}")
+    print(f"Exporting Layout+Orientation Classifier: {weights_path}")
     print(f"{'='*60}")
 
-    model = tv_models.resnet18(weights=None)
-    model.fc = nn.Linear(model.fc.in_features, 13)
+    model = LayoutOrientModel(num_layouts=13, num_rotations=4, num_flips=2)
 
     ckpt = torch.load(weights_path, map_location="cpu", weights_only=False)
     if "model_state_dict" in ckpt:
@@ -97,8 +96,13 @@ def export_layout_classifier(weights_path: str, out_name: str = "layout_classifi
     torch.onnx.export(
         model, dummy, onnx_path,
         input_names=["image"],
-        output_names=["layout_logits"],
-        dynamic_axes={"image": {0: "batch_size"}, "layout_logits": {0: "batch_size"}},
+        output_names=["layout_logits", "rot_logits", "flip_logits"],
+        dynamic_axes={
+            "image": {0: "batch_size"},
+            "layout_logits": {0: "batch_size"},
+            "rot_logits": {0: "batch_size"},
+            "flip_logits": {0: "batch_size"},
+        },
         opset_version=14,
         do_constant_folding=True,
     )
@@ -108,11 +112,15 @@ def export_layout_classifier(weights_path: str, out_name: str = "layout_classifi
     # Verify
     import onnxruntime as ort
     sess = ort.InferenceSession(onnx_path)
-    out = sess.run(None, {"image": dummy.numpy()})[0]
+    onnx_out = sess.run(None, {"image": dummy.numpy()})
     with torch.no_grad():
-        ref = model(dummy).numpy()
-    diff = np.abs(out - ref).max()
-    print(f"  Verification: max diff = {diff:.6f} {'OK' if diff < 1e-4 else 'WARNING'}")
+        ref_layout, ref_rot, ref_flip = model(dummy)
+    diff_layout = np.abs(onnx_out[0] - ref_layout.numpy()).max()
+    diff_rot = np.abs(onnx_out[1] - ref_rot.numpy()).max()
+    diff_flip = np.abs(onnx_out[2] - ref_flip.numpy()).max()
+    print(f"  Verification: layout max diff = {diff_layout:.6f} {'OK' if diff_layout < 1e-4 else 'WARNING'}")
+    print(f"  Verification: rot max diff = {diff_rot:.6f} {'OK' if diff_rot < 1e-4 else 'WARNING'}")
+    print(f"  Verification: flip max diff = {diff_flip:.6f} {'OK' if diff_flip < 1e-4 else 'WARNING'}")
 
     return onnx_path
 

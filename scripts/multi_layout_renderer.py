@@ -67,7 +67,7 @@ LAYOUTS = {
             ['II', 'aVL', 'V2', 'V5'],
             ['III', 'aVF', 'V3', 'V6'],
         ],
-        'rhythm_leads': ['II', 'V1'],
+        'rhythm_leads': ['II', 'V5'],
     },
     'standard_3x4_with_r3': {
         'grid_rows': 3, 'cols': 4,
@@ -176,6 +176,9 @@ def render_ecg(
     background_color: str = 'white',
     mask_mode: bool = False,
     _resolved_rhythm: list = None,
+    figsize_scale: float = 1.0,
+    dpi: int = 100,
+    save_path: str = None,
 ) -> Image.Image:
     """Render ECG leads into a PIL Image using the specified layout.
 
@@ -197,9 +200,12 @@ def render_ecg(
         background_color: Figure background color
         mask_mode: If True, use mask colors (red=grid, green=text, blue=signal, black=bg)
         _resolved_rhythm: Pre-resolved rhythm leads (for consistency between img/mask)
+        figsize_scale: Scale factor for figure size (0.5 = half size, faster rendering)
+        dpi: DPI for rendering (lower = faster, 72 is good for training data)
+        save_path: If set, save directly to this path and return None (avoids BytesIO overhead)
 
     Returns:
-        PIL Image of rendered ECG
+        PIL Image of rendered ECG (or None if save_path is set)
     """
     # Mask mode overrides colors for segmentation mask generation
     if mask_mode:
@@ -240,8 +246,8 @@ def render_ecg(
         y_offsets.append(y)
 
     # Figure size: scale height with rows
-    fig_w = 40
-    fig_h = max(5 * total_rows, 10)
+    fig_w = 40 * figsize_scale
+    fig_h = max(5 * total_rows, 10) * figsize_scale
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     fig.patch.set_facecolor(background_color)
     ax.set_facecolor(background_color)
@@ -325,10 +331,17 @@ def render_ecg(
 
     plt.tight_layout()
 
-    # Convert to PIL Image
     bg = background_color if background_color != 'white' else 'white'
+
+    # Direct save to file (faster — avoids BytesIO + PIL reparse)
+    if save_path is not None:
+        plt.savefig(save_path, format='png', dpi=dpi, facecolor=bg, edgecolor='none')
+        plt.close(fig)
+        return None
+
+    # Convert to PIL Image
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', facecolor=bg, edgecolor='none')
+    plt.savefig(buf, format='png', dpi=dpi, facecolor=bg, edgecolor='none')
     buf.seek(0)
     img = Image.open(buf).copy()
     buf.close()
@@ -388,6 +401,9 @@ def render_ecg_random_style(
     layout_name: str = 'standard_3x4_with_r1',
     amplitude_factor: float = 4.88,
     width: int = 2500,
+    figsize_scale: float = 1.0,
+    dpi: int = 100,
+    save_path: str = None,
 ) -> Image.Image:
     """Render ECG with randomized visual style for training data diversity.
 
@@ -415,6 +431,7 @@ def render_ecg_random_style(
         show_labels=show_labels, show_grid=show_grid,
         linewidth=linewidth, line_color=line_color,
         random_rhythm=True, label_fontsize=label_fontsize,
+        figsize_scale=figsize_scale, dpi=dpi, save_path=save_path,
     )
 
 

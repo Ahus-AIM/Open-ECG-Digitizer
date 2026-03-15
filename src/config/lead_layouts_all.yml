@@ -64,11 +64,11 @@ standard_3x4_with_r1:
     - ["I", "aVR", "V1", "V4"]
     - ["II", "aVL", "V2", "V5"]
     - ["III", "aVF", "V3", "V6"]
-  rhythm_leads: ["Any"]
+  rhythm_leads: ["II"]
   total_rows: 4
 
 standard_3x4_with_r2:
-  description: "3×4 standard layout with 2 wildcard rhythm leads"
+  description: "3×4 standard layout with 2 rhythm leads (II + V5)"
   layout:
     rows: 3
     cols: 4
@@ -76,11 +76,11 @@ standard_3x4_with_r2:
     - ["I", "aVR", "V1", "V4"]
     - ["II", "aVL", "V2", "V5"]
     - ["III", "aVF", "V3", "V6"]
-  rhythm_leads: ["Any", "Any"]
+  rhythm_leads: ["II", "V5"]
   total_rows: 5
 
 standard_3x4_with_r3:
-  description: "3×4 standard layout with 3 wildcard rhythm leads"
+  description: "3×4 standard layout with 3 rhythm leads (II + V1 + V5)"
   layout:
     rows: 3
     cols: 4
@@ -88,7 +88,7 @@ standard_3x4_with_r3:
     - ["I", "aVR", "V1", "V4"]
     - ["II", "aVL", "V2", "V5"]
     - ["III", "aVF", "V3", "V6"]
-  rhythm_leads: ["Any", "Any", "Any"]
+  rhythm_leads: ["II", "V1", "V5"]
   total_rows: 6
 
 standard_6x2:
@@ -127,7 +127,7 @@ standard_6x2_with_r1:
     - ["aVR", "V4"]
     - ["aVL", "V5"]
     - ["aVF", "V6"]
-  rhythm_leads: ["Any"]
+  rhythm_leads: ["II"]
   total_rows: 7
 
 precordial_3x2:

@@ -147,36 +147,52 @@ class LeadIdentifier:
                     canonical[canon_idx, start:end] = sign * chunk
                     used_indices.add((canon_idx, start, end))
 
-        # If there are any rythm, leads, we try to match them with the canonical leads, through cosine similarity.
+        # Assign rhythm leads to canonical positions.
+        # If the layout YAML specifies exact lead names, assign directly.
+        # Otherwise fall back to cosine similarity matching.
         num_rhythm_leads: int = len(rhythm_leads)
         if num_rhythm_leads > 0:
-            rhythm_corrs: NDArray[np.float32] = np.full((num_rhythm_leads, num_leads), -1, dtype=np.float32)
-            for i in range(num_rhythm_leads):
-                rhythm_vec: torch.Tensor = lines[-num_rhythm_leads + i, :]
-                for j in range(num_leads):
-                    corr: float = self._nan_cossim(rhythm_vec, canonical[j, :])
-                    rhythm_corrs[i, j] = corr
+            specified = [(i, r) for i, r in enumerate(rhythm_leads) if r != "Any"]
+            unspecified_indices = [i for i, r in enumerate(rhythm_leads) if r == "Any"]
 
-            # Leads II, V1 and V5 are most commonly used for rhythm, so we inflate their cosine similarity.
-            # Other matches are still possible.
-            if num_rhythm_leads == 1:
-                rhythm_corrs[:, 1] = self._inflate_cossim(rhythm_corrs[:, 1])
-            elif num_rhythm_leads == 2:
-                rhythm_corrs[:, 1] = self._inflate_cossim(rhythm_corrs[:, 1])
-                rhythm_corrs[:, 6] = self._inflate_cossim(rhythm_corrs[:, 6])
-            elif num_rhythm_leads == 3:
-                rhythm_corrs[:, 1] = self._inflate_cossim(rhythm_corrs[:, 1])
-                rhythm_corrs[:, 6] = self._inflate_cossim(rhythm_corrs[:, 6])
-                rhythm_corrs[:, 10] = self._inflate_cossim(rhythm_corrs[:, 10])
-            try:
-                row_idx, col_idx = linear_sum_assignment(-rhythm_corrs)
-                for i_r, i_c in zip(row_idx, col_idx):
-                    corr_val: float = rhythm_corrs[i_r, i_c]
-                    print(f"Rhythm {i_r} → Canonical {canonical_order[i_c]} (corr={corr_val:.2f})")
-                    canonical[i_c, :] = lines[-num_rhythm_leads + i_r, :]
-            except ValueError:
-                if self.debug:
-                    print("Linear sum assignment failed, possibly due to NaN values in rhythm correlations.")
+            # Direct assignment for specified rhythm leads
+            for i, lead_name in specified:
+                if lead_name in canonical_order:
+                    canon_idx: int = canonical_order.index(lead_name)
+                    rhythm_line: torch.Tensor = lines[-num_rhythm_leads + i, :]
+                    canonical[canon_idx, :] = rhythm_line
+                    print(f"Rhythm {i} → {lead_name} (direct from layout YAML)")
+
+            # Cosine similarity matching only for unspecified ("Any") rhythm leads
+            if unspecified_indices:
+                n_unspecified = len(unspecified_indices)
+                rhythm_corrs: NDArray[np.float32] = np.full((n_unspecified, num_leads), -1, dtype=np.float32)
+                for ui, orig_i in enumerate(unspecified_indices):
+                    rhythm_vec: torch.Tensor = lines[-num_rhythm_leads + orig_i, :]
+                    for j in range(num_leads):
+                        corr: float = self._nan_cossim(rhythm_vec, canonical[j, :])
+                        rhythm_corrs[ui, j] = corr
+
+                # Inflate common rhythm leads: II (1), V1 (6), V5 (10)
+                if n_unspecified == 1:
+                    rhythm_corrs[:, 1] = self._inflate_cossim(rhythm_corrs[:, 1])
+                elif n_unspecified == 2:
+                    rhythm_corrs[:, 1] = self._inflate_cossim(rhythm_corrs[:, 1])
+                    rhythm_corrs[:, 10] = self._inflate_cossim(rhythm_corrs[:, 10])
+                elif n_unspecified >= 3:
+                    rhythm_corrs[:, 1] = self._inflate_cossim(rhythm_corrs[:, 1])
+                    rhythm_corrs[:, 6] = self._inflate_cossim(rhythm_corrs[:, 6])
+                    rhythm_corrs[:, 10] = self._inflate_cossim(rhythm_corrs[:, 10])
+                try:
+                    row_idx, col_idx = linear_sum_assignment(-rhythm_corrs)
+                    for ui_r, i_c in zip(row_idx, col_idx):
+                        orig_i = unspecified_indices[ui_r]
+                        corr_val: float = rhythm_corrs[ui_r, i_c]
+                        print(f"Rhythm {orig_i} → Canonical {canonical_order[i_c]} (corr={corr_val:.2f})")
+                        canonical[i_c, :] = lines[-num_rhythm_leads + orig_i, :]
+                except ValueError:
+                    if self.debug:
+                        print("Linear sum assignment failed, possibly due to NaN values in rhythm correlations.")
 
         return canonical
 
@@ -416,8 +432,10 @@ class LeadIdentifier:
         lines = lines * (mv_per_mm / avg_pixel_per_mm) * 1000
 
         non_nan_samples_per_column = torch.sum(~torch.isnan(lines), dim=0).numpy()
-        first_valid_index: int = int(np.argmax(non_nan_samples_per_column >= self.required_valid_samples))
-        last_valid_index: int = int(np.argmax(non_nan_samples_per_column[::-1] >= self.required_valid_samples))
+        # Use threshold of 1 (not required_valid_samples) to preserve rhythm strips
+        # that extend beyond the grid lead boundaries
+        first_valid_index: int = int(np.argmax(non_nan_samples_per_column >= 1))
+        last_valid_index: int = int(np.argmax(non_nan_samples_per_column[::-1] >= 1))
         last_valid_index = lines.shape[1] - last_valid_index - 1
         if first_valid_index <= last_valid_index:
             lines = lines[:, first_valid_index : last_valid_index + 1]
