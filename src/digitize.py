@@ -143,12 +143,24 @@ def save_outputs(got_values: dict[str, Any], output_basepath: str, save_mode: st
 
 def process_one_file(file_path: str, config: CN, inference_wrapper: Any, save_mode: str) -> None:
     image = decode_and_prepare_image(file_path)
+
+    # Precedence for layout-hint substring (passed to LeadIdentifier to
+    # constrain candidate layouts):
+    #   1. DATA.layout_should_include_substring as a literal string  -> use it directly
+    #      (e.g. "standard_3x4_with_r3" from an upstream classifier).
+    #   2. DATA.layout_should_include_substring == "auto_from_filename" -> use
+    #      the legacy filename heuristic ("limb" / "precordial" substring).
+    #   3. Any other value / null -> no hint (all candidate layouts considered).
+    hint_cfg = config.DATA.get("layout_should_include_substring")
     layout_should_include_substring: str | None = None
-    if config.DATA.get("layout_should_include_substring") is not None:
-        if "limb" in str(file_path):
-            layout_should_include_substring = "limb"
-        elif "precordial" in str(file_path):
-            layout_should_include_substring = "precordial"
+    if isinstance(hint_cfg, str) and hint_cfg:
+        if hint_cfg == "auto_from_filename":
+            if "limb" in str(file_path):
+                layout_should_include_substring = "limb"
+            elif "precordial" in str(file_path):
+                layout_should_include_substring = "precordial"
+        else:
+            layout_should_include_substring = hint_cfg
 
     got_values = inference_wrapper(image, layout_should_include_substring=layout_should_include_substring)
 
