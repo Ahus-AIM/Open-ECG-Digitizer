@@ -56,9 +56,21 @@ Below is an overview of their purpose and debugging relevance, in approximate ex
 
 ## Running inference on a folder with images
 1. Modify a config file with your paths and settings, for example [src/config/inference_wrapper_ahus_testset.yml](src/config/inference_wrapper_ahus_testset.yml)
-2. Ensure that your config file points to a layout file containing your expected layouts, for example [lead_layouts_reduced.yml](src/config/lead_layouts_reduced.yml) or [lead_layouts_george-moody-2024.yml](src/config/lead_layouts_george-moody-2024.yml)
+2. Ensure that your config file points to a layout file containing your expected layouts, for example [lead_layouts_reduced.yml](src/config/lead_layouts_reduced.yml), [lead_layouts_all.yml](src/config/lead_layouts_all.yml) (all 13 supported layouts — see [inference_wrapper_all_layouts.yml](src/config/inference_wrapper_all_layouts.yml) for a ready-to-use preset), or [lead_layouts_george-moody-2024.yml](src/config/lead_layouts_george-moody-2024.yml)
 3. Run: ```python3 -m src.digitize --config src/config/your_config_file.yml```
 4. You can also override the config file, for example: ```python3 -m src.digitize --config src/config/your_config_file.yml DATA.output_path=my_output/folder```
+
+### Constraining the layout match from an upstream classifier
+
+`DATA.layout_should_include_substring` controls which candidate layouts the lead identifier considers. This is the recommended way to pipe a prediction from a separate layout classifier into the digitizer so it can't silently fall back to the wrong layout:
+
+| Value | Behavior |
+|---|---|
+| `null` (default) | Consider every layout in the YAML. |
+| a literal substring, e.g. `"standard_3x4"` | Restrict candidates to layout names containing this substring. Ideal when an upstream classifier has already predicted the layout. |
+| `"auto_from_filename"` | Legacy heuristic: restrict candidates to `"limb"` if the filename contains `limb`, or to `"precordial"` if it contains `precordial`. |
+
+When the filter leaves no candidate layouts, `LeadIdentifier` now raises `ValueError` instead of silently picking the first YAML entry. When matching is attempted but fails, a `RuntimeWarning` is emitted so downstream code can decide whether to trust the fallback canonicalisation.
 
 > [!NOTE]
 > The output values are expressed in **microvolts (µV)**.
