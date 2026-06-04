@@ -303,7 +303,7 @@ def main(config: CN) -> Optional[ExperimentAnalysis]:
     # get different configurations each time you run the script.
     np.random.seed(42)
 
-    result = ray.tune.run(
+    result: ExperimentAnalysis = ray.tune.run(
         partial(load_and_train, config=config),
         resources_per_trial={"cpu": 16, "gpu": 1},
         config=ray_config,
@@ -311,7 +311,7 @@ def main(config: CN) -> Optional[ExperimentAnalysis]:
         scheduler=scheduler,
         stop=stopper,
     )
-    return result  # type: ignore
+    return result
 
 
 if __name__ == "__main__":

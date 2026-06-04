@@ -1,5 +1,5 @@
 import os
-from typing import Any
+from typing import Any, cast
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -394,7 +394,7 @@ class Dewarper(torch.nn.Module):
         coordinates = torch.from_numpy(self.final_local_maxima.copy()).float().to(self.device)
         edges_tensor = torch.tensor(self.final_edges, dtype=torch.long).to(self.device)
 
-        with torch.enable_grad():  # type: ignore
+        with cast(Any, torch.enable_grad)():
             positions = torch.nn.Parameter(coordinates, requires_grad=True).to(self.device)
             optimizer = torch.optim.Adam([positions], lr=self.optimizer_lr)
 

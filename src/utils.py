@@ -120,7 +120,7 @@ class CosineToConstantLR(torch.optim.lr_scheduler.LRScheduler):
         self.eta_min_divisor = eta_min_divisor
         super().__init__(optimizer, -1)
 
-    def get_lr(self) -> List[float]:
+    def get_lr(self) -> List[Any]:
         """Retrieve the learning rate of each parameter group."""
         torch.optim.lr_scheduler._warn_get_lr_called_within_step(self)
 
@@ -130,7 +130,7 @@ class CosineToConstantLR(torch.optim.lr_scheduler.LRScheduler):
                 return min_lr
             return min_lr + (base_lr - min_lr) * (1 + (math.cos(math.pi * (self._step_count - 1) / self.T_max))) / 2
 
-        return [_get_lr(base_lr) for base_lr in self.base_lrs]
+        return [_get_lr(float(base_lr)) for base_lr in self.base_lrs]
 
 
 class SavePlotsEveryN:
