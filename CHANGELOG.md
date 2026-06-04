@@ -2,6 +2,33 @@
 
 <!-- version list -->
 
+## v1.9.3 (2026-06-04)
+
+### Bug Fixes
+
+- Typechecking
+  ([`69d68c1`](https://github.com/Ahus-AIM/Open-ECG-Digitizer/commit/69d68c19335ecce4423e457e17c3a16d3d29ebbe))
+
+### Chores
+
+- Add license
+  ([`9e712fe`](https://github.com/Ahus-AIM/Open-ECG-Digitizer/commit/9e712feac158d127843faac7d5e100ced00d0e6e))
+
+### Continuous Integration
+
+- Use python3 in release workflows
+  ([`04e020b`](https://github.com/Ahus-AIM/Open-ECG-Digitizer/commit/04e020b1778e6c8b610686ae4b11f430cb092720))
+
+### Documentation
+
+- Add preprint to readme ([#37](https://github.com/Ahus-AIM/Open-ECG-Digitizer/pull/37),
+  [`cca543c`](https://github.com/Ahus-AIM/Open-ECG-Digitizer/commit/cca543cf0542240a6b5b027510a50ff2a8b38383))
+
+- Update readme with dataset link and citation
+  ([#40](https://github.com/Ahus-AIM/Open-ECG-Digitizer/pull/40),
+  [`963387f`](https://github.com/Ahus-AIM/Open-ECG-Digitizer/commit/963387ff5abdfa3db91c15ac52d6cf1214345a6a))
+
+
 ## v1.9.2 (2025-10-20)
 
 ### Bug Fixes
