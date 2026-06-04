@@ -27,6 +27,9 @@ module = [
     "scikit-image.*",
     "transformers.*",
     "sklearn.neighbors",
-    "torch_tps"
+    "torch_tps",
+    "cv2",
+    "pandas",
+    "yaml"
 ]
 ignore_missing_imports = true
