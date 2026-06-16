@@ -99,11 +99,24 @@ class InferenceWrapper(Module):
 
         signal_prob, grid_prob, text_prob = self._get_feature_maps(image)
 
-        with timed_section("Perspective detection", self.times):
-            alignment_params = self.perspective_detector(grid_prob)
-
-        with timed_section("Cropping", self.times):
-            source_points = self.cropper(signal_prob, alignment_params)
+        # Perspective + crop with a full-image fallback: zoomed-in photos may
+        # lack visible paper borders, which makes perspective detection or
+        # cropping raise. Falling back to the full-image rectangle yields a
+        # usable (if uncorrected) signal instead of a hard crash.
+        self.bounding_box_used = True
+        try:
+            with timed_section("Perspective detection", self.times):
+                alignment_params = self.perspective_detector(grid_prob)
+            with timed_section("Cropping", self.times):
+                source_points = self.cropper(signal_prob, alignment_params)
+        except Exception:
+            self.bounding_box_used = False
+            H, W = image.shape[-2], image.shape[-1]
+            source_points = torch.tensor(
+                [[0.0, 0.0], [float(W), 0.0], [float(W), float(H)], [0.0, float(H)]],
+                dtype=torch.float32,
+                device=image.device,
+            )
 
         aligned_image, aligned_signal_prob, aligned_grid_prob, aligned_text_prob = self._align_feature_maps(
             image, signal_prob, grid_prob, text_prob, source_points
@@ -160,6 +173,7 @@ class InferenceWrapper(Module):
                 "average_pixel_per_mm": avg_pixel_per_mm,
             },
             "source_points": source_points.cpu(),
+            "bounding_box_used": self.bounding_box_used,
         }
 
     def _align_feature_maps(

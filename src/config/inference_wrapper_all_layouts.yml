@@ -1,0 +1,71 @@
+MODEL:
+  class_path: 'src.model.inference_wrapper.InferenceWrapper'
+  KWARGS:
+    config:
+      SIGNAL_EXTRACTOR:
+        class_path: 'src.model.signal_extractor.SignalExtractor'
+        KWARGS: {}
+
+      PERSPECTIVE_DETECTOR:
+        class_path: 'src.model.perspective_detector.PerspectiveDetector'
+        KWARGS:
+          num_thetas: 250
+
+      DEWARPER:
+        class_path: 'src.model.dewarper.Dewarper'
+        KWARGS:
+          abs_peak_threshold: 0.1
+
+      SEGMENTATION_MODEL:
+        class_path: 'src.model.unet.UNet'
+        weight_path: './weights/unet_multilayout/best_weights.pt'
+        KWARGS:
+          num_in_channels: 3
+          num_out_channels: 4
+          dims: [32, 64, 128, 256, 320, 320, 320, 320]
+          depth: 2
+
+      CROPPER:
+        class_path: 'src.model.cropper.Cropper'
+        KWARGS:
+          granularity: 80
+          percentiles: [0.02, 0.98]
+          alpha: 0.85
+
+      PIXEL_SIZE_FINDER:
+        class_path: 'src.model.pixel_size_finder.PixelSizeFinder'
+        KWARGS:
+          min_number_of_grid_lines: 30
+          max_number_of_grid_lines: 70
+          lower_grid_line_factor: 0.3
+
+      LAYOUT_IDENTIFIER:
+        class_path: 'src.model.lead_identifier.LeadIdentifier'
+        # Use the full 13-layout catalogue so cases like standard_3x4_with_r3
+        # don't silently fall back to a reduced set. Narrow this via
+        # DATA.layout_should_include_substring when an upstream classifier
+        # provides a layout hint.
+        config_path: 'src/config/lead_layouts_all.yml'
+        unet_config_path: 'src/config/lead_name_unet.yml'
+        unet_weight_path: './weights/lead_name_unet_weights_07072025.pt'
+        KWARGS:
+          debug: false
+          device: 'cuda'
+          possibly_flipped: false
+
+    device: 'cuda'
+    resample_size: 3000
+    rotate_on_resample: true
+    enable_timing: false
+    apply_dewarping: false
+
+DATA:
+  images_path: 'sandbox/test_ecgs/'
+  image_extensions: ['.png', '.jpg', '.jpeg', '.JPG']
+  output_path: 'sandbox/test_ecgs_output_all_layouts'
+  save_mode: 'all'
+  # Set this to either a literal layout substring (e.g. "standard_3x4") fed
+  # from an upstream layout classifier, or to the string "auto_from_filename"
+  # to restore the legacy heuristic (matches "limb" / "precordial" in the
+  # filename). Leave null to consider every layout in the YAML above.
+  layout_should_include_substring: null

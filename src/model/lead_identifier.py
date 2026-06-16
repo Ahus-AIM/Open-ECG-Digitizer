@@ -1,3 +1,4 @@
+import warnings
 from copy import deepcopy
 from typing import Any, Optional, Union
 
@@ -482,7 +483,23 @@ class LeadIdentifier:
             match = self._match_layout(detected, rows_in_layout, layouts, self.possibly_flipped)
 
         if "layout" not in match:
-            print(f"No matching layout found, defaulting to first layout: {list(layouts.keys())[0]}")
+            if not layouts:
+                # Caller over-constrained the candidate set (e.g. a layout hint
+                # that doesn't match any entry in the YAML). Fail loudly rather
+                # than silently mislabeling leads.
+                raise ValueError(
+                    "No candidate layouts available for lead matching. Check "
+                    "that `layout_should_include_substring` matches an entry "
+                    "in the lead-layouts YAML."
+                )
+            warnings.warn(
+                f"No matching layout found (n_detected={len(detected)}, "
+                f"rows_in_layout={rows_in_layout}). Falling back to first "
+                f"candidate '{list(layouts.keys())[0]}' — canonical lead "
+                f"assignments are unreliable.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             match["layout"] = list(layouts.keys())[0]
 
         canonical_lines = self._canonicalize_lines(lines.clone(), match)

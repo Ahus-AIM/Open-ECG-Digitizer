@@ -117,38 +117,54 @@ def save_png_plot(got_values: dict[str, Any], canonical: torch.Tensor | None, ou
     plt.close()
 
 
-def save_matching_cost(got_values: dict[str, Any], output_basepath: str) -> None:
-    # if no csv called digization_metadata.csv exists, create it with header "matching_cost, is_flipped, lead_layout"
+def save_matching_cost(got_values: dict[str, Any], output_basepath: str, status: str = "ok") -> None:
+    # Metadata CSV: one row per processed file with matching cost, flip flag,
+    # identified layout, the bounding-box-used flag, and a status column
+    # (ok / no_canonical_lines / error). The status column lets downstream
+    # consumers filter out rows where the CSV was never written.
     metadata_file = os.path.join(os.path.dirname(output_basepath), "digitization_metadata.csv")
     if not os.path.exists(metadata_file):
         with open(metadata_file, "w") as f:
-            f.write("file_path,matching_cost,is_flipped,lead_layout\n")
-    # then append the values
+            f.write("file_path,matching_cost,is_flipped,lead_layout,bounding_box_used,status\n")
     with open(metadata_file, "a") as f:
         file_name = os.path.basename(output_basepath)
         matching_cost = got_values.get("signal", {}).get("layout_matching_cost", float("nan"))
-        is_flipped = got_values.get("is_flipped", False)
+        is_flipped = got_values.get("is_flipped", got_values.get("signal", {}).get("layout_is_flipped", False))
         lead_layout = got_values.get("layout_name", "")
-        f.write(f"{file_name},{matching_cost},{is_flipped},{lead_layout}\n")
+        bbox_used = got_values.get("bounding_box_used", True)
+        f.write(f"{file_name},{matching_cost},{is_flipped},{lead_layout},{bbox_used},{status}\n")
 
 
 def save_outputs(got_values: dict[str, Any], output_basepath: str, save_mode: str = "all") -> None:
     canonical = canonical_from_got_values(got_values)
+    status = "ok" if canonical is not None else "no_canonical_lines"
     if save_mode in ["all", "timeseries_only"]:
         save_timeseries_csv(canonical, output_basepath)
     if save_mode in ["all", "png_only"]:
         save_png_plot(got_values, canonical, output_basepath)
-    save_matching_cost(got_values, output_basepath)
+    save_matching_cost(got_values, output_basepath, status=status)
 
 
 def process_one_file(file_path: str, config: CN, inference_wrapper: Any, save_mode: str) -> None:
     image = decode_and_prepare_image(file_path)
+
+    # Precedence for layout-hint substring (passed to LeadIdentifier to
+    # constrain candidate layouts):
+    #   1. DATA.layout_should_include_substring as a literal string  -> use it directly
+    #      (e.g. "standard_3x4_with_r3" from an upstream classifier).
+    #   2. DATA.layout_should_include_substring == "auto_from_filename" -> use
+    #      the legacy filename heuristic ("limb" / "precordial" substring).
+    #   3. Any other value / null -> no hint (all candidate layouts considered).
+    hint_cfg = config.DATA.get("layout_should_include_substring")
     layout_should_include_substring: str | None = None
-    if config.DATA.get("layout_should_include_substring") is not None:
-        if "limb" in str(file_path):
-            layout_should_include_substring = "limb"
-        elif "precordial" in str(file_path):
-            layout_should_include_substring = "precordial"
+    if isinstance(hint_cfg, str) and hint_cfg:
+        if hint_cfg == "auto_from_filename":
+            if "limb" in str(file_path):
+                layout_should_include_substring = "limb"
+            elif "precordial" in str(file_path):
+                layout_should_include_substring = "precordial"
+        else:
+            layout_should_include_substring = hint_cfg
 
     got_values = inference_wrapper(image, layout_should_include_substring=layout_should_include_substring)
 
