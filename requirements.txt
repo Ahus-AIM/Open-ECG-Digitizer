@@ -21,3 +21,4 @@ plotly
 ipywidgets
 opencv-python
 torch-tps
+git+https://github.com/HeartWise-AI/DeepECG_Preprocess.git@codex/multi-layout-rendering#egg=ecg-plotter
