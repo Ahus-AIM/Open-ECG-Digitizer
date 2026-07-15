@@ -178,7 +178,7 @@ class SyntheticLeadTextDataset(Dataset[tuple[Tensor, Tensor]]):
             img = np.maximum(img, rand_img)
 
         img = self._apply_transforms(img)
-        img = np.clip(img, 0.0, 1.0)  # type: ignore
+        np.clip(img, 0.0, 1.0, out=img)
 
         img_tensor = self.transform(img)
         label_tensor = torch.zeros(13, self.image_size, self.image_size, dtype=torch.float32)

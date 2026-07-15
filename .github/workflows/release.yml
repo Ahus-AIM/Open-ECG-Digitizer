@@ -29,9 +29,13 @@ jobs:
           git checkout -B ${{ github.ref_name }} ${{ github.sha }}
 
       - name: Install | Python Semantic Release
-        run: python -m pip install python-semantic-release==10.1.0
+        run: |
+          python3.12 -m venv venv
+          ./venv/bin/python -m ensurepip --upgrade
+          ./venv/bin/python -m pip install --upgrade pip
+          ./venv/bin/python -m pip install python-semantic-release==10.1.0
 
       - name: Action | Semantic Version Release
-        run: python -m semantic_release -vv version
+        run: ./venv/bin/python -m semantic_release -vv version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
