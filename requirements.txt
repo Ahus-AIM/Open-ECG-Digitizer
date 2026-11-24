@@ -1,11 +1,9 @@
-ipython
 matplotlib
 numpy
 pillow
 scikit-image
 scipy
 torch
-torchaudio
 torchvision
 tqdm
 types-tqdm
@@ -17,7 +15,5 @@ networkx
 types-networkx
 scikit-learn
 transformers
-plotly
-ipywidgets
 opencv-python
 torch-tps

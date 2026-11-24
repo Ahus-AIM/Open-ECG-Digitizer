@@ -60,6 +60,8 @@ Below is an overview of their purpose and debugging relevance, in approximate ex
 3. Run: ```python3 -m src.digitize --config src/config/your_config_file.yml```
 4. You can also override the config file, for example: ```python3 -m src.digitize --config src/config/your_config_file.yml DATA.output_path=my_output/folder```
 
+Use `--seed 42` for repeatable inference on the same ordered inputs and hardware. PNG export uses up to six CPU processes. Use `--plot-workers 0` for in-process export.
+
 > [!NOTE]
 > The output values are expressed in **microvolts (µV)**.
 

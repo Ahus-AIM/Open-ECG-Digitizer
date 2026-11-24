@@ -3,15 +3,21 @@ on: [push]
 
 jobs:
   test:
-    runs-on: self-hosted
+    runs-on: ubuntu-24.04
+    env:
+      PIP_NO_CACHE_DIR: '1'
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Set up Python virtual environment and install tools
         run: |
-          python3.12 -m venv venv
+          python -m venv venv
           ./venv/bin/python -m ensurepip --upgrade
           ./venv/bin/python -m pip install --upgrade pip
+          ./venv/bin/python -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
           ./venv/bin/python -m pip install -r requirements.txt
           ./venv/bin/python -m pip install pytest
 

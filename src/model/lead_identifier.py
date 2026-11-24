@@ -169,8 +169,8 @@ class LeadIdentifier:
                 rhythm_corrs[:, 6] = self._inflate_cossim(rhythm_corrs[:, 6])
                 rhythm_corrs[:, 10] = self._inflate_cossim(rhythm_corrs[:, 10])
             try:
-                row_idx, col_idx = linear_sum_assignment(-rhythm_corrs)
-                for i_r, i_c in zip(row_idx, col_idx):
+                rhythm_rows, canonical_columns = linear_sum_assignment(-rhythm_corrs)
+                for i_r, i_c in zip(rhythm_rows, canonical_columns):
                     corr_val: float = rhythm_corrs[i_r, i_c]
                     print(f"Rhythm {i_r} → Canonical {canonical_order[i_c]} (corr={corr_val:.2f})")
                     canonical[i_c, :] = lines[-num_rhythm_leads + i_r, :]
@@ -259,14 +259,15 @@ class LeadIdentifier:
         _, C, H, W = probs_tensor.shape
         arr: NDArray[Any] = probs_tensor[0].cpu().numpy()
         pts: list[tuple[str, float, float]] = []
+        xs = np.arange(W, dtype=np.float64)[None, :]
+        ys = np.arange(H, dtype=np.float64)[:, None]
         for i, name in enumerate(lead_names):
             channel: NDArray[Any] = arr[i]
-            if np.sum(channel) == 0:
+            mass = np.sum(channel)
+            if mass == 0:
                 continue
-            x_fmap: NDArray[np.float64] = np.arange(W).reshape(1, W).repeat(H, axis=0).astype(np.float64)
-            y_fmap: NDArray[np.float64] = np.arange(H).reshape(H, 1).repeat(W, axis=1).astype(np.float64)
-            x_com: float = float(np.sum(x_fmap * channel) / np.sum(channel))
-            y_com: float = float(np.sum(y_fmap * channel) / np.sum(channel))
+            x_com = float(np.sum(np.multiply(xs, channel, order="C")) / mass)
+            y_com = float(np.sum(np.multiply(ys, channel, order="C")) / mass)
             pts.append((name, x_com, y_com))
         return pts
 

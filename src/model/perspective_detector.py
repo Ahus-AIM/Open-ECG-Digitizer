@@ -55,7 +55,6 @@ class PerspectiveDetector:
         idxs_flat = rhos_idxs * num_thetas + torch.arange(num_thetas, device=device).reshape(1, -1)
 
         idxs_flat = idxs_flat.flatten()
-        idxs_flat = idxs_flat[idxs_flat < num_rhos * num_thetas]
 
         accumulator.index_add_(0, idxs_flat, torch.ones_like(idxs_flat, dtype=torch.int32))
         accumulator = accumulator.view(len(rhos), len(thetas))
@@ -285,11 +284,15 @@ class PerspectiveDetector:
         H, W = accumulator.shape
         x_start, x_end = torch.meshgrid(torch.arange(W), torch.arange(W), indexing="ij")
         slopes = torch.where(x_start != x_end, H / (x_end - x_start).float(), torch.tensor(float("inf")))
-        y_coords = torch.arange(H).view(-1, 1, 1).float()
+        # Keep the small slope calculation on the CPU. Sample and reduce where the accumulator lives.
+        slopes = slopes.to(accumulator.device)
+        x_start = x_start.to(accumulator.device)
+        y_coords = torch.arange(H, device=accumulator.device).view(-1, 1, 1).float()
         x_coords = torch.where(
             slopes == float("inf"), x_start.float(), x_start + y_coords / slopes  # Diagonal entries: x_start == x_end
         )
-        x_coords_clamped = torch.clamp(x_coords.round(), 0, W - 1).long()
+        x_coords_clamped = x_coords.round_().clamp_(0, W - 1).long()
+        del x_coords
         sampled_values = accumulator[y_coords.long(), x_coords_clamped]
         variances = torch.var(sampled_values, dim=0)
         return variances
