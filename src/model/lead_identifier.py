@@ -256,21 +256,26 @@ class LeadIdentifier:
     ) -> list[tuple[str, float, float]]:
         if lead_names is None:
             lead_names = self.LEAD_CHANNEL_ORDER
-        _, C, H, W = probs_tensor.shape
+        _, _, H, W = probs_tensor.shape
         channels = probs_tensor[0]
-        if channels.is_cuda and channels.is_contiguous() and len(lead_names) <= C:
-            # Thresholding usually leaves only a few lead channels. Keep the
-            # original dense NumPy reduction for every channel with any mass.
-            active = channels[: len(lead_names)].any(dim=(1, 2)).nonzero().flatten()
-            names = [lead_names[i] for i in active.tolist()]
-            channels = channels.index_select(0, active)
-        else:
-            names = lead_names
+        if channels.is_cuda:
+            channels = channels[: len(lead_names)]
+            # Reduce each axis first, so only two short projections per lead
+            # need double precision for the coordinate-weighted sums.
+            dtype = torch.float64 if channels.dtype == torch.float64 else torch.float32
+            rows = channels.sum(dim=2, dtype=dtype).double()
+            cols = channels.sum(dim=1, dtype=dtype).double()
+            mass = rows.sum(dim=1)
+            x = (cols * torch.arange(W, device=channels.device)).sum(dim=1) / mass
+            y = (rows * torch.arange(H, device=channels.device)).sum(dim=1) / mass
+            centers = torch.stack((mass, x, y), dim=1).tolist()
+            return [(name, x_pos, y_pos) for name, (m, x_pos, y_pos) in zip(lead_names, centers, strict=True) if m != 0]
+
         arr: NDArray[Any] = channels.cpu().numpy()
         pts: list[tuple[str, float, float]] = []
         xs = np.arange(W, dtype=np.float64)[None, :]
         ys = np.arange(H, dtype=np.float64)[:, None]
-        for i, name in enumerate(names):
+        for i, name in enumerate(lead_names):
             channel: NDArray[Any] = arr[i]
             mass = np.sum(channel)
             if mass == 0:

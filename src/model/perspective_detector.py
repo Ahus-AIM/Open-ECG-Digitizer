@@ -261,9 +261,41 @@ class PerspectiveDetector:
         """
         flattened_tensor = tensor.flatten()
         if len(flattened_tensor) > max_num_elems:
-            indices = torch.randperm(len(flattened_tensor), generator=image_generator())[:max_num_elems]
-            flattened_tensor = flattened_tensor[indices]
+            indices = self._sample_indices(len(flattened_tensor), max_num_elems)
+            flattened_tensor = flattened_tensor[indices.to(tensor.device)]
         return torch.quantile(flattened_tensor, q)
+
+    @staticmethod
+    def _sample_indices(size: int, count: int) -> torch.Tensor:
+        generator = image_generator()
+        # A dense shuffle is cheap for small maps. PyTorch also uses a
+        # different (64-bit) shuffle for very large populations.
+        if size <= 4 * count or size >= (2**32 - 1) // 20:
+            return torch.randperm(size, generator=generator)[:count]
+
+        # Match the first count swaps of the CPU randperm Fisher-Yates
+        # shuffle. Store only positions that an earlier swap has touched.
+        # Each full-width int64 draw packs two consecutive 32-bit RNG words.
+        pairs = torch.empty((count + 1) // 2, dtype=torch.int64).random_(-(2**63), None, generator=generator)
+        words = torch.stack((pairs >> 32, pairs), dim=1).flatten()[:count] & 0xFFFFFFFF
+        positions = torch.arange(count)
+        partners = (positions + words % (size - positions)).tolist()
+        swapped: dict[int, int] = {}
+        sample = []
+        for i, partner in enumerate(partners):
+            sample.append(swapped.get(partner, partner))
+            if partner != i:
+                swapped[partner] = swapped.pop(i, i)
+
+        # Later Hough sampling and waveform jitter use this same stream.
+        # Advance past the discarded swaps without building a page-sized array.
+        remaining = size - 1 - 2 * len(pairs)
+        scratch = torch.empty(min(remaining, 65536), dtype=torch.int32)
+        while remaining > 0:
+            block = scratch[:remaining]
+            block.random_(generator=generator)
+            remaining -= len(block)
+        return torch.tensor(sample, dtype=torch.int64)
 
     def to_flat_greyscale(self, image: torch.Tensor) -> torch.Tensor:
         image = image.float()

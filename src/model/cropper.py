@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Dict, List, Tuple
 
 import torch
@@ -102,38 +103,31 @@ class Cropper(torch.nn.Module):
     def _get_bounds(
         self, normalized_signal_probabilities: torch.Tensor, thetas: torch.Tensor, rhos: torch.Tensor, mode: str
     ) -> Tuple[int, int]:
-        buffer = self._create_buffer(normalized_signal_probabilities, thetas, rhos, mode)
-        values = self._calculate_values(buffer, normalized_signal_probabilities)
-        return self._get_indices(values)
+        # Along a scanline, bin j ends at its (j+1)-th sorted boundary.
+        # Gather the cumulative signal mass there instead of constructing a
+        # page-sized mask for every bin.
+        coordinates: Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
+        if mode == "horizontal":
+            scanlines = normalized_signal_probabilities
+            coordinates = self._y_to_x
+        elif mode == "vertical":
+            scanlines = normalized_signal_probabilities.T
+            coordinates = self._x_to_y
+        else:
+            raise ValueError("mode must be either 'horizontal' or 'vertical'")
 
-    def _create_buffer(
-        self, signal_probabilities: torch.Tensor, thetas: torch.Tensor, rhos: torch.Tensor, mode: str
-    ) -> torch.Tensor:
-        buffer = torch.zeros(signal_probabilities.shape[-2], signal_probabilities.shape[-1], dtype=torch.int)
-        buffer = self._fill_buffer(buffer, thetas, rhos, mode)
-        return buffer
-
-    def _calculate_values(self, buffer: torch.Tensor, normalized_signal_probabilities: torch.Tensor) -> torch.Tensor:
-        """
-        Calculate the sum of normalized_signal_probabilities in each bin of the buffer, where bins are defined by the buffer.
-
-        Args:
-            buffer (torch.Tensor): The buffer defining the bins (contains integers between 1 and self.granularity).
-            normalized_signal_probabilities (torch.Tensor): The normalized signal probabilities.
-
-        Returns:
-            torch.Tensor: The values of the bins (sum of values is 1).
-        """
-        device = normalized_signal_probabilities.device
-        # Match one_hot's range checks while transferring only one bin index per pixel.
-        lowest, highest = torch.aminmax(buffer)
-        if lowest < 0:
-            raise RuntimeError("Class values must be non-negative.")
-        if highest >= self.granularity:
+        height, width = scanlines.shape
+        # Border pixels inherit the bin of the adjacent interior pixel.
+        row = torch.arange(height).clamp(1, max(1, height - 2)).view(-1, 1)
+        boundaries = coordinates(row, thetas, rhos).round().long().clamp_(0, width - 1)
+        ends = boundaries.sort(dim=1).values
+        ends = torch.where(ends <= 1, 0, torch.where(ends == width - 1, width, ends))
+        if (ends[:, -1] < width).any():
             raise RuntimeError("Class values must be smaller than num_classes.")
-        one_hot_buffer = buffer.to(device).unsqueeze(-1) == torch.arange(self.granularity, device=device)
-        values = (one_hot_buffer * normalized_signal_probabilities.unsqueeze(-1)).sum((0, 1))
-        return values
+        ends = ends.to(scanlines.device)
+        prefix = torch.cumsum(scanlines, dim=1, dtype=torch.float64)
+        mass = prefix.gather(1, (ends - 1).clamp_min_(0)).masked_fill_(ends == 0, 0).sum(0)
+        return self._get_indices(mass / mass[-1])
 
     def _initialize_parameters(
         self, params: Dict[str, torch.Tensor]
@@ -173,8 +167,7 @@ class Cropper(torch.nn.Module):
         y = (rho_second * torch.cos(theta_first) - rho_first * torch.cos(theta_second)) / det
         return torch.stack((x, y))
 
-    def _get_indices(self, values: torch.Tensor) -> Tuple[int, int]:
-        cumsum_values = values.cumsum(0) / values.sum()
+    def _get_indices(self, cumsum_values: torch.Tensor) -> Tuple[int, int]:
         lower_bound: int = int((cumsum_values >= self.percentiles[0]).nonzero().min())
         upper_bound: int = int((cumsum_values <= self.percentiles[1]).nonzero().max())
         width = (upper_bound - lower_bound) / (self.percentiles[1] - self.percentiles[0])
@@ -185,33 +178,6 @@ class Cropper(torch.nn.Module):
     def _normalize_signal_probabilities(self, signal_probabilities: torch.Tensor) -> torch.Tensor:
         normalized_signal_probabilities = signal_probabilities / signal_probabilities.sum()
         return normalized_signal_probabilities.squeeze()
-
-    def _fill_buffer(self, buffer: torch.Tensor, thetas: torch.Tensor, rhos: torch.Tensor, mode: str) -> torch.Tensor:
-        if mode == "horizontal":
-            y = torch.arange(buffer.shape[-2])
-            for theta, rho in zip(thetas, rhos):
-                x = self._y_to_x(y, theta, rho)
-                x = x.round().long().clamp(min=0, max=buffer.shape[-1] - 1)
-                buffer[y, x] += 1
-            buffer = buffer.cumsum(dim=1)
-        elif mode == "vertical":
-            x = torch.arange(buffer.shape[-1])
-            for theta, rho in zip(thetas, rhos):
-                y = self._x_to_y(x, theta, rho)
-                y = y.round().long().clamp(min=0, max=buffer.shape[-2] - 1)
-                buffer[y, x] += 1
-            buffer = buffer.cumsum(dim=0)
-        else:
-            raise ValueError("mode must be either 'horizontal' or 'vertical'")
-
-        return self._fix_edge_effects(buffer)
-
-    def _fix_edge_effects(self, buffer: torch.Tensor) -> torch.Tensor:
-        buffer[0, :] = buffer[1, :]
-        buffer[-1, :] = buffer[-2, :]
-        buffer[:, 0] = buffer[:, 1]
-        buffer[:, -1] = buffer[:, -2]
-        return buffer
 
     def _x_to_y(self, x: torch.Tensor, theta: torch.Tensor, rho: torch.Tensor) -> torch.Tensor:
         r"""
