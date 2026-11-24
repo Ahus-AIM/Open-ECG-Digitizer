@@ -60,7 +60,7 @@ Below is an overview of their purpose and debugging relevance, in approximate ex
 3. Run: ```python3 -m src.digitize --config src/config/your_config_file.yml```
 4. You can also override the config file, for example: ```python3 -m src.digitize --config src/config/your_config_file.yml DATA.output_path=my_output/folder```
 
-Use `--seed 42` for repeatable inference on the same ordered inputs and hardware. PNG export uses up to six CPU processes. Use `--plot-workers 0` for in-process export.
+Each ECG starts with seed 42 by default. On the same hardware and software, its sampled grid points, noise and signals are reproducible across runs and independent of folder order. Use `--seed N` to select another sequence. PNG export uses up to six CPU processes. Use `--plot-workers 0` for in-process export.
 
 > [!NOTE]
 > The output values are expressed in **microvolts (µV)**.

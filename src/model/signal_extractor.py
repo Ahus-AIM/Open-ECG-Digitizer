@@ -10,6 +10,8 @@ from scipy.ndimage import find_objects
 from scipy.optimize import linear_sum_assignment
 from skimage.measure import label
 
+from src.seed import image_generator
+
 
 class SignalExtractor:
     threshold_sum: float
@@ -187,7 +189,7 @@ class SignalExtractor:
 
             for step in scores:
                 prev = path_y[-1]
-                vals = step[prev] + torch.randn(candidate_count) * 1e-6
+                vals = step[prev] + torch.randn(candidate_count, generator=image_generator()) * 1e-6
                 vals += vals.std() * penalty
                 path_y.append(max(0, min(H - 1, prev + int(vals.argmin()) - self.candidate_span)))
 
@@ -210,8 +212,9 @@ class SignalExtractor:
         """
         if kernel_size % 2 == 0:
             kernel_size += 1
-        kernel = torchvision.transforms.GaussianBlur(kernel_size, sigma=sigma)
-        blurred_tensor: torch.Tensor = kernel(tensor.unsqueeze(0).unsqueeze(0)).squeeze(0).squeeze(0)
+        blurred_tensor: torch.Tensor = torchvision.transforms.functional.gaussian_blur(
+            tensor[None, None], [kernel_size, kernel_size], [sigma, sigma]
+        ).squeeze(0).squeeze(0)
         return blurred_tensor
 
     def _autodetect_num_peaks(self, fmap: torch.Tensor) -> int:

@@ -14,6 +14,7 @@ from tqdm import tqdm
 from yacs.config import CfgNode as CN
 
 from src.config.default import get_cfg
+from src.seed import DEFAULT_INFERENCE_SEED, seed_inference
 
 if TYPE_CHECKING:
     import numpy.typing as npt
@@ -30,7 +31,7 @@ def get_candidate_file_paths(config: CN) -> list[str]:
         for file in files:
             if file.endswith(tuple(config.DATA.image_extensions)):
                 candidate_filenames.append(os.path.join(root, file))
-    random.seed(42)
+    random.seed(DEFAULT_INFERENCE_SEED)
     random.shuffle(candidate_filenames)
     return candidate_filenames
 
@@ -173,20 +174,19 @@ def process_one_file(file_path: str, config: CN, inference_wrapper: Any, save_mo
         save_outputs(got_values, _output_basepath(file_path, config), save_mode)
 
 
-def main(config: CN, seed: int | None = None, plot_workers: int = 0) -> None:
+def main(config: CN, seed: int | None = DEFAULT_INFERENCE_SEED, plot_workers: int = 0) -> None:
     # Import the inference stack only in the process that owns the models.
     from src.utils import import_class_from_path
 
-    if seed is not None:
-        import numpy as np
-        import torch
-
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
+    from src.model.inference_wrapper import InferenceWrapper
 
     inference_wrapper_class = import_class_from_path(config.MODEL.class_path)
-    inference_wrapper = inference_wrapper_class(**config.MODEL.KWARGS)
+    kwargs = dict(config.MODEL.KWARGS)
+    if inference_wrapper_class is InferenceWrapper:
+        kwargs["seed"] = seed
+    else:
+        seed_inference(seed)
+    inference_wrapper = inference_wrapper_class(**kwargs)
     save_mode: str = getattr(config.DATA, "save_mode", "all")
     file_paths: list[str] = get_candidate_file_paths(config)
 
@@ -249,7 +249,7 @@ if __name__ == "__main__":
         default=min(6, os.cpu_count() or 1),
         help="CPU processes for PNG export (default: up to 6). Use 0 for in-process export.",
     )
-    parser.add_argument("--seed", type=int, help="Seed inference once before processing the folder.")
+    parser.add_argument("--seed", type=int, default=DEFAULT_INFERENCE_SEED, help="Inference seed (default: 42).")
     parser.add_argument(
         "--config",
         type=str,

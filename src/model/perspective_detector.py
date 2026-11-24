@@ -2,6 +2,8 @@ from typing import Dict, Tuple
 
 import torch
 
+from src.seed import image_generator
+
 DEBUG = False
 
 if DEBUG:
@@ -39,7 +41,7 @@ class PerspectiveDetector:
 
         y_idxs, x_idxs = torch.nonzero(image, as_tuple=True)
         if len(y_idxs) > self.max_num_nonzero:
-            indices = torch.randperm(len(y_idxs))[: self.max_num_nonzero]
+            indices = torch.randperm(len(y_idxs), generator=image_generator())[: self.max_num_nonzero]
             y_idxs = y_idxs[indices]
             x_idxs = x_idxs[indices]
         cos_thetas = torch.cos(thetas)
@@ -247,7 +249,7 @@ class PerspectiveDetector:
         """
         flattened_tensor = tensor.flatten()
         if len(flattened_tensor) > max_num_elems:
-            indices = torch.randperm(len(flattened_tensor))[:max_num_elems]
+            indices = torch.randperm(len(flattened_tensor), generator=image_generator())[:max_num_elems]
             flattened_tensor = flattened_tensor[indices]
         return torch.quantile(flattened_tensor, q)
 
