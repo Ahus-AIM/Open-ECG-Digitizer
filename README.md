@@ -1,6 +1,6 @@
 # Open ECG Digitizer
 
-[![arXiv](https://img.shields.io/badge/arXiv-2510.19590-00cc66.svg)](https://arxiv.org/abs/2510.19590) ![Tests](https://github.com/Ahus-AIM/Electrocardiogram-Digitization/actions/workflows/test.yml/badge.svg?branch=main) ![](https://img.shields.io/badge/%20style-google-3666d6.svg) [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-31211/)
+[![npj Digital Medicine](https://img.shields.io/badge/npj_Digital_Medicine-paper-00cc66.svg)](https://doi.org/10.1038/s41746-025-02327-1) [![ECG-Image-Database on Kaggle](https://img.shields.io/badge/Kaggle-ECG--Image--Database-20BEFF.svg)](https://www.kaggle.com/datasets/physionet/ecg-image-database) ![Tests](https://github.com/Ahus-AIM/Electrocardiogram-Digitization/actions/workflows/test.yml/badge.svg?branch=main) ![](https://img.shields.io/badge/%20style-google-3666d6.svg) [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-31211/)
 
 This repository provides a highly configurable tool for digitizing 12-lead ECGs, extracting raw time series data from scanned images or photographs (e.g., taken with a phone). It supports any subset of the 12 standard leads and is robust to perspective distortions and image quality variations.
 
@@ -93,4 +93,19 @@ If you use this code or dataset in your research, **please cite the following pa
   url          = {https://doi.org/10.1038/s41746-025-02327-1},
   shorttitle   = {Digitizing Paper {ECGs} at Scale}
 }
+```
 
+If you use ECG-Image-Database, please also cite the dataset paper.
+
+```bibtex
+@article{reyna_ecg_image_database_2026,
+  author  = {Reyna, Matthew A. and {Deepanshi} and Weigle, Audrey T. and Koscova, Zuzana and Campbell, Kiersten and Kodthalu Shivashankara, Kshama and Saghafi, Soheil and Nikookar, Sepideh and Motie-Shirazi, Mohsen and Kiarashi, Yashar and Seyedi, Salman and Hassannia, Mohammadsina and Bj{\o}rnstad, Agnar M. and Stenhede, Elias and Ranjbar, Arian and Clifford, Gari D. and Sameni, Reza},
+  title   = {{ECG}-image-database: large-scale paired {ECG} images and time-series with real-world artifacts; a foundation for computerized {ECG} digitization and analysis},
+  journal = {Physiological Measurement},
+  year    = {2026},
+  volume  = {47},
+  number  = {7},
+  pages   = {075015},
+  doi     = {10.1088/1361-6579/ae85b2}
+}
+```
