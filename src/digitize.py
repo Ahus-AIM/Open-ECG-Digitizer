@@ -1,19 +1,25 @@
+from __future__ import annotations
+
 import argparse
+import multiprocessing
 import os
 import random
 import warnings
-from typing import Any
+from collections import deque
+from concurrent.futures import Future, ProcessPoolExecutor
+from contextlib import ExitStack
+from typing import TYPE_CHECKING, Any
 
-import matplotlib.pyplot as plt
-import numpy as np
-import numpy.typing as npt
-import torch
-from torchvision.io import decode_image
 from tqdm import tqdm
 from yacs.config import CfgNode as CN
 
 from src.config.default import get_cfg
-from src.utils import find_config_path, import_class_from_path
+
+if TYPE_CHECKING:
+    import numpy.typing as npt
+    import torch
+
+    from src.plot_ecg import ECGPlot
 
 LEAD_NAMES = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"]
 
@@ -51,6 +57,8 @@ def copy_file_structure(src: str, dst: str) -> None:
 
 
 def decode_and_prepare_image(file_path: str) -> torch.Tensor:
+    from torchvision.io import decode_image
+
     image: torch.Tensor = decode_image(file_path, mode="RGB")
     C, H, W = image.shape
     if C == 1:
@@ -70,6 +78,8 @@ def canonical_from_got_values(got_values: dict[str, Any]) -> torch.Tensor | None
 
 
 def save_timeseries_csv(canonical: torch.Tensor | None, output_basepath: str) -> None:
+    import numpy as np
+
     if canonical is None:
         return
     data: npt.NDArray[Any] = canonical.squeeze().cpu().numpy()
@@ -84,52 +94,48 @@ def save_timeseries_csv(canonical: torch.Tensor | None, output_basepath: str) ->
     np.savetxt(output_basepath + "_timeseries_canonical.csv", data, delimiter=",", header=header, comments="")
 
 
-def save_png_plot(got_values: dict[str, Any], canonical: torch.Tensor | None, output_basepath: str) -> None:
-    fig, axs = plt.subplots(2, 2, figsize=(20, 14))
-    axs[0, 0].imshow(got_values["input_image"].squeeze().permute(1, 2, 0).cpu().numpy() * 0.999)
-    source_points = got_values["source_points"]
-    axs[0, 0].scatter(source_points[:, 0].cpu().numpy(), source_points[:, 1].cpu().numpy(), s=20, c="red")
-    axs[0, 1].imshow(got_values["aligned"]["image"].squeeze().permute(1, 2, 0).cpu().numpy() * 0.999)
-    axs[1, 0].imshow(got_values["aligned"]["signal_prob"].squeeze().cpu().numpy(), interpolation="none", vmin=0, vmax=1)
-    for i in range(0, 15, 2):
-        for j in range(0, 15, 2):
-            xval = i * 5 / got_values["pixel_spacing_mm"]["x"]
-            yval = j * 5 / got_values["pixel_spacing_mm"]["y"]
-            axs[0, 1].add_patch(
-                plt.Rectangle(  # type: ignore
-                    (xval, yval),
-                    width=5 / got_values["pixel_spacing_mm"]["x"],
-                    height=5 / got_values["pixel_spacing_mm"]["y"],
-                    edgecolor="red",
-                    facecolor="none",
-                )
-            )
-    if canonical is not None:
-        lines: npt.NDArray[Any] = canonical.squeeze().cpu().numpy()
-        lines -= np.linspace(0, 24_000, num=lines.shape[0])[:, None]  # 2 uV offset per lead
-        axs[1, 1].plot(lines.T, linewidth=0.5)
-    plt.tight_layout()
-    plt.suptitle(
-        got_values.get("layout_name", "") + " Layout cost: " + f'{got_values["signal"]["layout_matching_cost"]:.2f}',
-        fontsize=16,
+def _prepare_plot(got_values: dict[str, Any], canonical: torch.Tensor | None) -> ECGPlot:
+    import numpy as np
+
+    from src.plot_ecg import ECGPlot
+
+    spacing = got_values["pixel_spacing_mm"]
+    # Convert only after the original scalar arithmetic to retain its dtype.
+    return ECGPlot(
+        image=got_values["input_image"].squeeze().permute(1, 2, 0).cpu().numpy(),
+        aligned=got_values["aligned"]["image"].squeeze().permute(1, 2, 0).cpu().numpy(),
+        signal_prob=got_values["aligned"]["signal_prob"].squeeze().cpu().numpy(),
+        source_points=got_values["source_points"].cpu().numpy(),
+        lines=canonical.squeeze().cpu().numpy() if canonical is not None else None,
+        xs=[np.asarray(i * 5 / spacing["x"]).flat[0] for i in range(0, 15, 2)],
+        ys=[np.asarray(i * 5 / spacing["y"]).flat[0] for i in range(0, 15, 2)],
+        width=np.asarray(5 / spacing["x"]).flat[0],
+        height=np.asarray(5 / spacing["y"]).flat[0],
+        title=got_values.get("layout_name", "") + f' Layout cost: {got_values["signal"]["layout_matching_cost"]:.2f}',
     )
-    plt.savefig(output_basepath + ".png", dpi=200)
-    plt.close()
+
+
+def save_png_plot(got_values: dict[str, Any], canonical: torch.Tensor | None, output_basepath: str) -> None:
+    _prepare_plot(got_values, canonical).save(output_basepath)
 
 
 def save_matching_cost(got_values: dict[str, Any], output_basepath: str) -> None:
-    # if no csv called digization_metadata.csv exists, create it with header "matching_cost, is_flipped, lead_layout"
-    metadata_file = os.path.join(os.path.dirname(output_basepath), "digitization_metadata.csv")
-    if not os.path.exists(metadata_file):
-        with open(metadata_file, "w") as f:
+    _append_metadata(output_basepath, _metadata_row(got_values, output_basepath))
+
+
+def _metadata_row(got_values: dict[str, Any], output_basepath: str) -> str:
+    name = os.path.basename(output_basepath)
+    cost = got_values.get("signal", {}).get("layout_matching_cost", float("nan"))
+    return f"{name},{cost},{got_values.get('is_flipped', False)},{got_values.get('layout_name', '')}\n"
+
+
+def _append_metadata(output_basepath: str, row: str) -> None:
+    path = os.path.join(os.path.dirname(output_basepath), "digitization_metadata.csv")
+    new = not os.path.exists(path)
+    with open(path, "a") as f:
+        if new:
             f.write("file_path,matching_cost,is_flipped,lead_layout\n")
-    # then append the values
-    with open(metadata_file, "a") as f:
-        file_name = os.path.basename(output_basepath)
-        matching_cost = got_values.get("signal", {}).get("layout_matching_cost", float("nan"))
-        is_flipped = got_values.get("is_flipped", False)
-        lead_layout = got_values.get("layout_name", "")
-        f.write(f"{file_name},{matching_cost},{is_flipped},{lead_layout}\n")
+        f.write(row)
 
 
 def save_outputs(got_values: dict[str, Any], output_basepath: str, save_mode: str = "all") -> None:
@@ -141,7 +147,7 @@ def save_outputs(got_values: dict[str, Any], output_basepath: str, save_mode: st
     save_matching_cost(got_values, output_basepath)
 
 
-def process_one_file(file_path: str, config: CN, inference_wrapper: Any, save_mode: str) -> None:
+def _infer_file(file_path: str, config: CN, inference_wrapper: Any) -> dict[str, Any]:
     image = decode_and_prepare_image(file_path)
     layout_should_include_substring: str | None = None
     if config.DATA.get("layout_should_include_substring") is not None:
@@ -150,17 +156,35 @@ def process_one_file(file_path: str, config: CN, inference_wrapper: Any, save_mo
         elif "precordial" in str(file_path):
             layout_should_include_substring = "precordial"
 
-    got_values = inference_wrapper(image, layout_should_include_substring=layout_should_include_substring)
+    values: dict[str, Any] = inference_wrapper(image, layout_should_include_substring=layout_should_include_substring)
+    return values
 
+
+def _output_basepath(file_path: str, config: CN) -> str:
+    rel_path = os.path.relpath(file_path, config.DATA.images_path)
+    basepath = os.path.splitext(os.path.join(config.DATA.output_path, rel_path))[0]
+    os.makedirs(os.path.dirname(basepath), exist_ok=True)
+    return basepath
+
+
+def process_one_file(file_path: str, config: CN, inference_wrapper: Any, save_mode: str) -> None:
+    got_values = _infer_file(file_path, config, inference_wrapper)
     if config.DATA.get("output_path") is not None:
-        rel_path = os.path.relpath(file_path, config.DATA.images_path)
-        output_file_path = os.path.join(config.DATA.output_path, rel_path)
-        output_basepath = os.path.splitext(output_file_path)[0]
-        os.makedirs(os.path.dirname(output_basepath), exist_ok=True)
-        save_outputs(got_values, output_basepath, save_mode)
+        save_outputs(got_values, _output_basepath(file_path, config), save_mode)
 
 
-def main(config: CN) -> None:
+def main(config: CN, seed: int | None = None, plot_workers: int = 0) -> None:
+    # Import the inference stack only in the process that owns the models.
+    from src.utils import import_class_from_path
+
+    if seed is not None:
+        import numpy as np
+        import torch
+
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
     inference_wrapper_class = import_class_from_path(config.MODEL.class_path)
     inference_wrapper = inference_wrapper_class(**config.MODEL.KWARGS)
     save_mode: str = getattr(config.DATA, "save_mode", "all")
@@ -171,23 +195,61 @@ def main(config: CN) -> None:
     if config.DATA.get("output_path") is not None:
         clear_and_prepare_output_dir(config)
 
-    for file_path in tqdm(file_paths):
-        should_be_included = not bool(include_list)
-        for include in include_list:
-            if include in file_path:
-                should_be_included = True
-        if not should_be_included:
-            continue
-        print(f"Processing file: {file_path}")
+    paths = [p for p in file_paths if not include_list or any(pattern in p for pattern in include_list)]
+    plot_workers = min(plot_workers, len(paths))
+    pending: deque[tuple[str, str, Future[None], str]] = deque()
+
+    def finish_oldest() -> None:
+        path, base, future, row = pending.popleft()
         try:
-            process_one_file(file_path, config, inference_wrapper, save_mode)
+            future.result()
+            _append_metadata(base, row)
         except Exception as e:
-            print(f"Error processing {file_path}: {e}")
-            continue
+            print(f"Error processing {path}: {e}")
+
+    with ExitStack() as stack:
+        pool = None
+        if plot_workers > 1 and save_mode in ("all", "png_only") and config.DATA.get("output_path"):
+            pool = stack.enter_context(
+                ProcessPoolExecutor(max_workers=plot_workers, mp_context=multiprocessing.get_context("spawn"))
+            )
+        for file_path in tqdm(paths):
+            print(f"Processing file: {file_path}")
+            try:
+                if pool is None:
+                    process_one_file(file_path, config, inference_wrapper, save_mode)
+                    continue
+                values = _infer_file(file_path, config, inference_wrapper)
+                base = _output_basepath(file_path, config)
+                # Bound memory and preserve overwrite order for equal filename stems.
+                while len(pending) >= plot_workers or any(job[1] == base for job in pending):
+                    finish_oldest()
+                canonical = canonical_from_got_values(values)
+                if save_mode == "all":
+                    save_timeseries_csv(canonical, base)
+                future = pool.submit(_prepare_plot(values, canonical).save, base)
+                pending.append((file_path, base, future, _metadata_row(values, base)))
+            except Exception as e:
+                print(f"Error processing {file_path}: {e}")
+        while pending:
+            finish_oldest()
 
 
 if __name__ == "__main__":
+    # Matplotlib allocates large, short-lived NumPy raster buffers. Requesting
+    # transparent huge pages for them can stall concurrent writers in Linux
+    # memory compaction. Set this before importing NumPy in the CLI and workers.
+    os.environ.setdefault("NUMPY_MADVISE_HUGEPAGE", "0")
+    from src.utils import find_config_path
+
     parser = argparse.ArgumentParser(description="Digitize ECGs and save output.")
+    parser.add_argument(
+        "--plot-workers",
+        type=int,
+        default=min(6, os.cpu_count() or 1),
+        help="CPU processes for PNG export (default: up to 6). Use 0 for in-process export.",
+    )
+    parser.add_argument("--seed", type=int, help="Seed inference once before processing the folder.")
     parser.add_argument(
         "--config",
         type=str,
@@ -229,4 +291,4 @@ if __name__ == "__main__":
         if kv_list:
             cfg.merge_from_list(kv_list)
 
-    main(cfg)
+    main(cfg, seed=args.seed, plot_workers=args.plot_workers)

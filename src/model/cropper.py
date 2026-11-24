@@ -124,9 +124,14 @@ class Cropper(torch.nn.Module):
         Returns:
             torch.Tensor: The values of the bins (sum of values is 1).
         """
-        one_hot_buffer = torch.nn.functional.one_hot(buffer, num_classes=self.granularity).to(
-            normalized_signal_probabilities.device
-        )
+        device = normalized_signal_probabilities.device
+        # Match one_hot's range checks while transferring only one bin index per pixel.
+        lowest, highest = torch.aminmax(buffer)
+        if lowest < 0:
+            raise RuntimeError("Class values must be non-negative.")
+        if highest >= self.granularity:
+            raise RuntimeError("Class values must be smaller than num_classes.")
+        one_hot_buffer = buffer.to(device).unsqueeze(-1) == torch.arange(self.granularity, device=device)
         values = (one_hot_buffer * normalized_signal_probabilities.unsqueeze(-1)).sum((0, 1))
         return values
 

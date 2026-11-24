@@ -1,7 +1,11 @@
-from typing import Tuple
+from collections.abc import Iterator
+from typing import Any, Tuple
 
 import numpy as np
+import numpy.typing as npt
 import torch
+
+Scalar = float | torch.Tensor
 
 
 class PixelSizeFinder(torch.nn.Module):
@@ -43,7 +47,7 @@ class PixelSizeFinder(torch.nn.Module):
         self.zoom_factor = zoom_factor
         self.lower_grid_line_factor = lower_grid_line_factor
 
-    def forward(self, image: torch.Tensor) -> Tuple[float, float]:
+    def forward(self, image: torch.Tensor) -> Tuple[Scalar, Scalar]:
         """
         Finds mm/pixel from an image with a grid and an similarily colored background. The grid needs to be orthogonal
         to the rows and columns.
@@ -64,12 +68,12 @@ class PixelSizeFinder(torch.nn.Module):
 
         return estimate_x, estimate_y
 
-    def _mm_per_pixel_y(self, image: torch.Tensor, aspect: float = 1) -> float:
+    def _mm_per_pixel_y(self, image: torch.Tensor, aspect: float = 1) -> Scalar:
         pxls_between_lines = self._find_pxls_between_horizontal_grid_lines(image, aspect)
 
         return self.mm_between_grid_lines / pxls_between_lines
 
-    def _find_pxls_between_horizontal_grid_lines(self, image: torch.Tensor, aspect: float) -> float:
+    def _find_pxls_between_horizontal_grid_lines(self, image: torch.Tensor, aspect: float) -> Scalar:
         col_sum = image.sum(dim=-1)
         col_sum = col_sum - col_sum.mean()
         autocorrelation = np.correlate(col_sum.cpu().numpy(), col_sum.cpu().numpy(), mode="full")
@@ -78,7 +82,7 @@ class PixelSizeFinder(torch.nn.Module):
 
         return pxls_between_lines
 
-    def _zoom_grid_search_min_distance(self, autocorrelation: torch.Tensor, aspect: float) -> float:
+    def _zoom_grid_search_min_distance(self, autocorrelation: torch.Tensor, aspect: float) -> Scalar:
         """
         Finds the best pixels between lines in the autocorrelation tensor by doing a grid search over potential pixels
         distances and zooming in on the current optimum until convergence.
@@ -96,8 +100,8 @@ class PixelSizeFinder(torch.nn.Module):
         autocorrelation = autocorrelation[: autocorrelation.shape[0] // 2].flip(0)
         autocorrelation = autocorrelation - autocorrelation.mean()
 
-        min_dist_grid_lines = autocorrelation.shape[-1] / expected_max_grid_lines
-        max_dist_grid_lines = autocorrelation.shape[-1] / expected_min_grid_lines
+        min_dist_grid_lines: Scalar = autocorrelation.shape[-1] / expected_max_grid_lines
+        max_dist_grid_lines: Scalar = autocorrelation.shape[-1] / expected_min_grid_lines
 
         pxls_between_lines = self._grid_search_min_distance(
             autocorrelation, self.samples, min_dist_grid_lines, max_dist_grid_lines
@@ -105,8 +109,9 @@ class PixelSizeFinder(torch.nn.Module):
 
         for _ in range(self.max_zoom):
             w = (max_dist_grid_lines - min_dist_grid_lines) / self.zoom_factor
-            min_dist_grid_lines = max(pxls_between_lines - w, min_dist_grid_lines)
-            max_dist_grid_lines = min(pxls_between_lines + w, max_dist_grid_lines)
+            lower, upper = pxls_between_lines - w, pxls_between_lines + w
+            min_dist_grid_lines = min_dist_grid_lines if min_dist_grid_lines > lower else lower
+            max_dist_grid_lines = max_dist_grid_lines if max_dist_grid_lines < upper else upper
             curr_pxls_between_lines = self._grid_search_min_distance(
                 autocorrelation, self.samples, min_dist_grid_lines, max_dist_grid_lines
             )
@@ -116,8 +121,8 @@ class PixelSizeFinder(torch.nn.Module):
         return curr_pxls_between_lines
 
     def _grid_search_min_distance(
-        self, autocorrelation: torch.Tensor, samples: int, min_dist_grid_lines: float, max_dist_grid_lines: float
-    ) -> float:
+        self, autocorrelation: torch.Tensor, samples: int, min_dist_grid_lines: Scalar, max_dist_grid_lines: Scalar
+    ) -> Scalar:
         """Grid searches over the pixels between peaks in the interval [min_dist_grid_lines, max_dist_grid_lines] in the autocorrelation tensor.
 
         Args:
@@ -130,30 +135,41 @@ class PixelSizeFinder(torch.nn.Module):
             float (float): best pixels between peaks
         """
 
-        pixels_between_grid_lines = torch.linspace(min_dist_grid_lines, max_dist_grid_lines, samples)
+        spacings = torch.linspace(min_dist_grid_lines, max_dist_grid_lines, samples)
+        length = len(autocorrelation)
+        weights = torch.tensor(np.linspace(1, 0, length), dtype=torch.float32)
 
-        best_grid_discretization_score = torch.tensor(-torch.inf)
-        best_pixels_between_grid_line = 0
+        # Precompute the three possible products at each position. Preserve the
+        # multiply order (grid * weight first), including signed zeros and NaNs.
+        def products(value: float) -> npt.NDArray[Any]:
+            return (autocorrelation * (torch.full_like(autocorrelation, value) * weights)).numpy()
 
-        for pixels_between_grid_line in pixels_between_grid_lines:
-            calculated_grid_lines = torch.zeros_like(autocorrelation)
-            weighting = np.linspace(1, 0, len(autocorrelation))
+        empty, minor, major = products(0), products(self.lower_grid_line_factor), products(1)
+        steps = (spacings / 5).tolist()
 
-            indices = (
-                (torch.arange(0, autocorrelation.shape[-1], pixels_between_grid_line / 5, dtype=torch.float32))
-                .round()
-                .to(torch.int64)
-            )
-            indices = indices[indices < autocorrelation.shape[-1]]
+        def indices(i: int) -> npt.NDArray[np.int64]:
+            return torch.arange(0, length, steps[i], dtype=torch.float32).round().long().numpy()
 
-            calculated_grid_lines[indices] = self.lower_grid_line_factor
-            calculated_grid_lines[indices[::5]] = 1
-            calculated_grid_lines = calculated_grid_lines * torch.tensor(weighting, dtype=torch.float32)
+        def patterns(
+            first: int, last: int, left: npt.NDArray[np.int64], right: npt.NDArray[np.int64]
+        ) -> Iterator[tuple[int, npt.NDArray[np.int64]]]:
+            # Raw arange lengths are monotone. Equal lengths give the same SIMD
+            # partition, in which every rounded tick is monotone in the step.
+            if first == last or np.array_equal(left, right):
+                yield first, left[left < length]
+            else:
+                mid = (first + last) // 2
+                yield from patterns(first, mid, left, left if mid == first else indices(mid))
+                yield from patterns(mid + 1, last, right if mid + 1 == last else indices(mid + 1), right)
 
-            grid_discretization_score = (autocorrelation * calculated_grid_lines).sum()
-
-            if best_grid_discretization_score < grid_discretization_score:
-                best_grid_discretization_score = grid_discretization_score
-                best_pixels_between_grid_line = pixels_between_grid_line
-
-        return best_pixels_between_grid_line
+        best_score = -float("inf")
+        best_index = None
+        if samples:
+            for i, ticks in patterns(0, samples - 1, indices(0), indices(samples - 1)):
+                candidate = empty.copy()
+                candidate[ticks] = minor[ticks]
+                candidate[ticks[::5]] = major[ticks[::5]]
+                score = torch.from_numpy(candidate).sum().item()
+                if score > best_score:
+                    best_score, best_index = score, i
+        return spacings[best_index] if best_index is not None else 0

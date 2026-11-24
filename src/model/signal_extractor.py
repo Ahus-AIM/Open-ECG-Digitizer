@@ -6,6 +6,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 import torchvision
+from scipy.ndimage import find_objects
 from scipy.optimize import linear_sum_assignment
 from skimage.measure import label
 
@@ -90,16 +91,41 @@ class SignalExtractor:
         good: list[torch.Tensor] = []
         rejected: list[torch.Tensor] = []
         rej_maps: list[torch.Tensor] = []
-        for lid in np.unique(lab):
-            if lid == 0:
-                continue
-            mask = torch.tensor(lab == lid)
+        # A column reduction is independent of all other columns. Pack disjoint
+        # (label, column) pairs together while preserving the full reduction
+        # shape, dtype and row order of the original masked sums.
+        height, width = lab.shape
+        ys, xs = np.nonzero(lab)
+        if not xs.size:
+            return good, rejected, rej_maps
+        stride = int(lab.max()) + 1
+        pairs, inverse = np.unique(xs * stride + lab[ys, xs], return_inverse=True)
+        cols, labels = np.divmod(pairs, stride)
+        starts = np.flatnonzero(np.r_[True, cols[1:] != cols[:-1]])
+        slots = np.arange(len(cols)) - np.repeat(starts, np.diff(starts, append=len(cols)))
+        pixel_slots = slots[inverse]
+        centers = torch.empty(len(cols), dtype=fmap.dtype)
+        for slot in range(int(slots.max()) + 1):
+            pixels = pixel_slots == slot
+            mask = torch.zeros((height, width), dtype=torch.bool)
+            mask[ys[pixels], xs[pixels]] = True
             line = self._extract_line_from_region(fmap, mask)
-            if self._classify_line(line, mask):
+            selected = slots == slot
+            centers[selected] = line[cols[selected]]
+
+        for lid in np.unique(labels):
+            selected = labels == lid
+            line = torch.full((width,), float("nan"), dtype=fmap.dtype)
+            active_cols = cols[selected]
+            values = centers[selected]
+            line[active_cols] = values
+            rows = values.long().clamp(0, height - 1).numpy()
+            in_mask = torch.from_numpy(lab[rows, active_cols] == lid)
+            if in_mask.float().mean().item() >= self.threshold_line_in_mask:
                 good.append(line)
             else:
                 rejected.append(line)
-                rej_maps.append(fmap * mask)
+                rej_maps.append(fmap * torch.from_numpy(lab == lid))
 
         for line in (*good, *rejected):
             line[line < 5] = float("nan")
@@ -120,11 +146,11 @@ class SignalExtractor:
 
     def _label_regions(self, fmap: torch.Tensor) -> npt.NDArray[np.int64]:
         lab: npt.NDArray[np.int64] = label((fmap.numpy() > self.label_thresh).astype(int), connectivity=1)  # type: ignore
-        for lb in np.unique(lab):
-            if lb == 0:
-                continue
-            if fmap[lab == lb].sum() < self.threshold_sum:
-                lab[lab == lb] = 0
+        for lb, bounds in enumerate(find_objects(lab), start=1):
+            region = lab[bounds]
+            mask = region == lb
+            if fmap[bounds][mask].sum() < self.threshold_sum:
+                region[mask] = 0
         output: npt.NDArray[np.int64] = label(lab > 0, connectivity=1)  # type: ignore
         return output
 
@@ -136,12 +162,6 @@ class SignalExtractor:
         line[line < 1 / fmap.shape[0]] = float("nan")
         return line
 
-    def _classify_line(self, line: torch.Tensor, mask: torch.Tensor) -> bool:
-        lf = line.long().clamp(0, mask.shape[0] - 1)
-        cols = mask.any(0)
-        in_mask = mask[lf, torch.arange(mask.shape[1])]
-        return bool(in_mask[cols].float().mean().item() >= self.threshold_line_in_mask)
-
     def _trace_horizontal_path(self, img_arr: npt.NDArray[Any]) -> tuple[torch.Tensor, torch.Tensor]:
         blurry = torch.tensor(img_arr, dtype=torch.float32)
         blurry += (torch.linspace(-1, 1, blurry.shape[0]) ** 6).unsqueeze(1)
@@ -149,30 +169,33 @@ class SignalExtractor:
         H, W = img.shape
         path_y: list[int] = [H // 2]
 
-        for x in range(1, W):
-            prev = path_y[-1]
-            candidates = torch.arange(prev - self.candidate_span, prev + self.candidate_span + 1).clamp(0, H - 1)
-            vals = self._get_pixel_vals(blurry, candidates, x)
-            path_y.append(int(candidates[torch.argmin(vals)].item()))
+        candidate_count = 2 * self.candidate_span + 1
+        penalty = torch.tensor(np.linspace(-1, 1, candidate_count) ** 2, dtype=torch.float32)
+        # The walk depends on its previous row. Precompute only its deterministic
+        # segment means, in bounded column blocks, and draw the jitter in walk order.
+        rows = torch.arange(-self.candidate_span, H + self.candidate_span).clamp(0, H - 1)
+        block_width = max(1, min(128, 65536 // (H * candidate_count)))
+        for start in range(1, W, block_width):
+            stop = min(start + block_width, W)
+            columns = blurry[rows, start - 1 : stop].T.contiguous()
+            scores = torch.empty((stop - start, H, candidate_count), dtype=blurry.dtype)
+            for i, offset in enumerate(range(-self.candidate_span, self.candidate_span + 1)):
+                first = self.candidate_span + min(offset, 0)
+                windows = columns.unfold(1, abs(offset) + 1, 1)[:, first : first + H]
+                means = windows.contiguous().mean(dim=-1)
+                scores[:, :, i] = (means[:-1] + means[1:]) / 2
+
+            for step in scores:
+                prev = path_y[-1]
+                vals = step[prev] + torch.randn(candidate_count) * 1e-6
+                vals += vals.std() * penalty
+                path_y.append(max(0, min(H - 1, prev + int(vals.argmin()) - self.candidate_span)))
 
         for i in range(len(path_y) - 1):
             lo, hi = sorted((path_y[i], path_y[i + 1]))
             img[lo - 1 : hi + 2, i] = 0
 
         return torch.tensor(path_y), img
-
-    def _get_pixel_vals(self, blurry_img: torch.Tensor, candidates: torch.Tensor, x: int) -> torch.Tensor:
-        middle = len(candidates) // 2
-        this_col = blurry_img[candidates, x - 1]
-        other_col = blurry_img[candidates, x]
-        pixel_vals: list[torch.Tensor] = []
-        for i in range(len(candidates)):
-            seg = slice(min(i, middle), max(i, middle) + 1)
-            pixel_vals.append((this_col[seg].mean() + other_col[seg].mean()) / 2)
-        vals = torch.stack(pixel_vals)
-        vals += torch.randn(len(candidates)) * 1e-6
-        vals += vals.std() * torch.tensor(np.linspace(-1, 1, len(candidates)) ** 2, dtype=torch.float32)
-        return vals
 
     def _blur(self, tensor: torch.Tensor, kernel_size: int = 3, sigma: float = 1.0) -> torch.Tensor:
         """
@@ -314,10 +337,9 @@ class SignalExtractor:
             merged_line = torch.full((group_lines.shape[1],), float("nan"))
             overlap = valid_mask.sum(0)
             overlaps.append(float(overlap[overlap > 0].float().mean().item()))
-            for col in range(group_lines.shape[1]):
-                valid_values = group_lines[:, col][~torch.isnan(group_lines[:, col])]
-                if len(valid_values) > 0:
-                    merged_line[col] = valid_values[0]
+            # Later writes win, so visit the component in reverse priority order.
+            for row, valid in zip(group_lines.flip(0), valid_mask.flip(0)):
+                merged_line = torch.where(valid, row.to(merged_line.dtype), merged_line)
             merged.append(merged_line)
         return merged, overlaps
 
