@@ -194,11 +194,15 @@ def _run_signal_batch(config: CN, paths: list[str], model: Any, workers: int, po
     # when two inputs share an output filename. Bound the number of live maps.
     failed = 0
     pending: deque[Future[int]] = deque()
-    with ThreadPoolExecutor(1) as writer:
-        for path in tqdm(paths):
+    with ThreadPoolExecutor(1) as reader, ThreadPoolExecutor(1) as writer:
+        next_image = reader.submit(decode_and_prepare_image, paths[0])
+        for index, path in enumerate(tqdm(paths)):
+            image = next_image
+            if index + 1 < len(paths):
+                next_image = reader.submit(decode_and_prepare_image, paths[index + 1])
             print(f"Processing file: {path}")
             try:
-                inputs, detected = prepare_record(model, decode_and_prepare_image(path))
+                inputs, detected = prepare_record(model, image.result())
                 task = pool.submit(extract_record, model.signal_extractor, model.pixel_size_finder, inputs)
                 pending.append(writer.submit(save_record, path, task, detected))
             except Exception as e:

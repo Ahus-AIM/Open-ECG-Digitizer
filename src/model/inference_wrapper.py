@@ -166,8 +166,10 @@ class InferenceWrapper(Module):
 
     def _aligned_maps(self, image: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         self._check_image_dimensions(image)
-        image = self.min_max_normalize(image)
-        image = image.to(self.device)
+        if image.dtype == torch.uint8:
+            # Transfer the decoded bytes before expanding them to floating point.
+            image = image.to(self.device)
+        image = self.min_max_normalize(image).to(self.device)
 
         self.times = {}
         image = self._resample_image(image)
@@ -320,7 +322,8 @@ class InferenceWrapper(Module):
             return signal_prob, grid_prob, text_prob
 
     def min_max_normalize(self, image: Tensor) -> Tensor:
-        return (image - image.min()) / (image.max() - image.min())
+        minimum = image.min()
+        return (image - minimum) / (image.max() - minimum)
 
     def _load_signal_extractor(self) -> Any:
         signal_extractor_class = import_class_from_path(self.config.SIGNAL_EXTRACTOR.class_path)
