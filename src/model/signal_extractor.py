@@ -1,14 +1,13 @@
 from collections import defaultdict, deque
 from typing import Any, Optional
 
+import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 import torch
 import torchvision
-from scipy.ndimage import find_objects
 from scipy.optimize import linear_sum_assignment
-from skimage.measure import label
 
 from src.seed import image_generator
 
@@ -77,45 +76,39 @@ class SignalExtractor:
     def _extract_candidate_lines(
         self, fmap: torch.Tensor
     ) -> tuple[list[torch.Tensor], list[torch.Tensor], list[tuple[slice, slice, torch.Tensor]]]:
-        lab: npt.NDArray[Any] = self._label_regions(fmap)
-        zero_mask = lab == 0
-        big_offset = lab.max() + 1000  # Just some big number to avoid overlap
-
-        for i in range(self.split_num_stripes):
-            sl = slice(
-                i * lab.shape[1] // self.split_num_stripes,
-                (i + 1) * lab.shape[1] // self.split_num_stripes,
-            )
-            relab: npt.NDArray[np.int64] = label(lab[:, sl] > 0, connectivity=1)  # type: ignore
-            lab[:, sl] += big_offset * i + relab
-        lab[zero_mask] = 0
-
+        labeled = self._stripe_labels(fmap)
+        if labeled is None:
+            return [], [], []
+        lab, ys, xs = labeled
+        pixels = fmap.numpy()[ys, xs]
+        height, width = lab.shape
         good: list[torch.Tensor] = []
         rejected: list[torch.Tensor] = []
         rej_maps: list[tuple[slice, slice, torch.Tensor]] = []
         # A column reduction is independent of all other columns. Pack disjoint
         # (label, column) pairs together while preserving the full reduction
         # shape, dtype and row order of the original masked sums.
-        height, width = lab.shape
-        ys, xs = np.nonzero(lab)
-        if not xs.size:
-            return good, rejected, rej_maps
-        stride = int(lab.max()) + 1
         pixel_labels = lab[ys, xs]
-        pairs, inverse = np.unique(xs * stride + pixel_labels, return_inverse=True)
+        stride = int(pixel_labels.max()) + 1
+        pairs, inverse = np.unique(xs.astype(np.int64) * stride + pixel_labels, return_inverse=True)
         cols, labels = np.divmod(pairs, stride)
         starts = np.flatnonzero(np.r_[True, cols[1:] != cols[:-1]])
         slots = np.arange(len(cols)) - np.repeat(starts, np.diff(starts, append=len(cols)))
         pixel_slots = slots[inverse]
-        pixel_values = fmap.numpy()[ys, xs]
         centers = torch.empty(len(cols), dtype=fmap.dtype)
+        masked = torch.zeros((height, width), dtype=fmap.dtype)
+        buffer = masked.numpy()
         for slot in range(int(slots.max()) + 1):
-            pixels = pixel_slots == slot
-            masked = torch.zeros((height, width), dtype=fmap.dtype)
-            masked.numpy()[ys[pixels], xs[pixels]] = pixel_values[pixels]
-            line = self._column_centers(masked)
+            active = pixel_slots == slot
+            y, x, v = ys[active], xs[active], pixels[active]
+            buffer[y, x] = v
+            mass = masked.sum(0).clamp_min_(1e-6).numpy()
+            buffer[y, x] = (v / mass[x]) * y.astype(v.dtype)
+            line = masked.sum(0)
+            line[line < 1 / height] = float("nan")
             selected = slots == slot
             centers[selected] = line[cols[selected]]
+            buffer[y, x] = 0
 
         for lid in np.unique(labels):
             selected = labels == lid
@@ -139,6 +132,48 @@ class SignalExtractor:
 
         return good, rejected, rej_maps
 
+    def _stripe_labels(
+        self, fmap: torch.Tensor
+    ) -> tuple[npt.NDArray[np.int32], npt.NDArray[np.int32], npt.NDArray[np.int32]] | None:
+        # SAUF numbers four-connected components in row-major order. This
+        # order also determines priority when fragments are later merged.
+        foreground = (fmap.numpy() > self.label_thresh).view(np.uint8)
+        points = cv2.findNonZero(foreground)
+        if points is None:
+            return None
+        xs, ys = np.asarray(points, dtype=np.int32).reshape(-1, 2).T
+        count, regions = cv2.connectedComponentsWithAlgorithm(foreground, 4, cv2.CV_32S, cv2.CCL_SAUF)
+        lab = np.asarray(regions, dtype=np.int32)
+        labels = lab[ys, xs]
+        # Stable grouping preserves the pixel order of each original masked
+        # Torch sum, including for components right at the rejection threshold.
+        order = np.argsort(labels, kind="stable")
+        pixels = torch.from_numpy(fmap.numpy()[ys[order], xs[order]])
+        ends = np.bincount(labels, minlength=count).cumsum()
+        keep = np.zeros(count, dtype=bool)
+        for lid in range(1, count):
+            keep[lid] = not bool(pixels[ends[lid - 1] : ends[lid]].sum() < self.threshold_sum)
+        valid = keep[labels]
+        if not valid.all():
+            foreground[ys[~valid], xs[~valid]] = 0
+            lab[ys[~valid], xs[~valid]] = 0
+            xs, ys, labels = xs[valid], ys[valid], labels[valid]
+        if not xs.size:
+            return None
+        global_ids = keep.cumsum(dtype=np.int32)[labels]
+        width = foreground.shape[1]
+        big_offset = int(global_ids.max()) + 1000
+        for stripe in range(self.split_num_stripes):
+            start, stop = stripe * width // self.split_num_stripes, (stripe + 1) * width // self.split_num_stripes
+            if stop > start:
+                _, local = cv2.connectedComponentsWithAlgorithm(foreground[:, start:stop], 4, cv2.CV_32S, cv2.CCL_SAUF)
+                selected = (xs >= start) & (xs < stop)
+                y, x = ys[selected], xs[selected]
+                lab[y, x] = global_ids[selected] + big_offset * stripe + local[y, x - start]
+        if self.split_num_stripes <= 0:
+            lab[ys, xs] = global_ids
+        return lab, ys, xs
+
     def _refine_fmap_by_removal(self, fmap: torch.Tensor, rej_maps: list[tuple[slice, slice, torch.Tensor]]) -> None:
         for y, x, mask_map in rej_maps:
             ys, xs = torch.where(mask_map > 0)
@@ -151,69 +186,64 @@ class SignalExtractor:
             region = fmap[y, x][y0 : y1 + 1, x0 : x1 + 1]
             region[cropped > 0] = new_img[cropped > 0]
 
-    def _label_regions(self, fmap: torch.Tensor) -> npt.NDArray[np.int64]:
-        lab: npt.NDArray[np.int64] = label((fmap.numpy() > self.label_thresh).astype(int), connectivity=1)  # type: ignore
-        for lb, bounds in enumerate(find_objects(lab), start=1):
-            region = lab[bounds]
-            mask = region == lb
-            if fmap[bounds][mask].sum() < self.threshold_sum:
-                region[mask] = 0
-        output: npt.NDArray[np.int64] = label(lab > 0, connectivity=1)  # type: ignore
-        return output
-
-    def _extract_line_from_region(self, fmap: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        return self._column_centers(torch.where(mask, fmap, torch.zeros_like(fmap)))
-
-    @staticmethod
-    def _column_centers(masked: torch.Tensor) -> torch.Tensor:
-        pos = torch.arange(masked.shape[0]).view(-1, 1)
-        masked /= masked.sum(0, keepdim=True).clamp(min=1e-6)
-        line = (masked * pos).sum(0)
-        line[line < 1 / masked.shape[0]] = float("nan")
-        return line
-
     def _trace_horizontal_path(self, img_arr: npt.NDArray[Any]) -> tuple[torch.Tensor, torch.Tensor]:
-        blurry = torch.tensor(img_arr, dtype=torch.float32)
-        blurry += (torch.linspace(-1, 1, blurry.shape[0]) ** 6).unsqueeze(1)
         img = torch.tensor(img_arr, dtype=torch.float32)
-        H, W = img.shape
-        path_y: list[int] = [H // 2]
-
-        candidate_count = 2 * self.candidate_span + 1
-        penalty = torch.tensor(np.linspace(-1, 1, candidate_count) ** 2, dtype=torch.float32)
-        # Most paths stay close to their current row. Compute segment means
-        # for a band ahead of the walk and recenter it if the path leaves it.
-        # Opposite offsets use the same interval viewed from its other end.
+        height, width = img.shape
+        blurry = img + (torch.linspace(-1, 1, height) ** 6)[:, None]
+        if width == 0:
+            return torch.tensor([height // 2]), img
         span = self.candidate_span
-        start = 1
-        while start < W:
-            first = max(0, path_y[-1] - span)
-            last = min(H, path_y[-1] + span + 1)
-            rows = torch.arange(first - span, last + span).clamp(0, H - 1)
-            stop = min(W, start + max(1, min(128, 65536 // ((last - first) * candidate_count))))
-            columns = blurry[rows, start - 1 : stop].T.contiguous()
-            scores = torch.empty((stop - start, last - first, candidate_count), dtype=blurry.dtype)
-            for offset in range(span + 1):
-                windows = columns.unfold(1, offset + 1, 1)[:, span - offset : span + last - first]
-                means = windows.contiguous().mean(dim=-1)
-                both = (means[:-1] + means[1:]) / 2
-                scores[:, :, span - offset] = both[:, : last - first]
-                scores[:, :, span + offset] = both[:, offset:]
+        offsets = torch.arange(-span, span + 1)
+        penalty = torch.tensor(np.linspace(-1, 1, len(offsets)) ** 2, dtype=torch.float32)
+        noise = torch.empty((width - 1, len(offsets)))
+        for row in noise:
+            torch.randn(len(offsets), generator=image_generator(), out=row)
+        noise *= 1e-6
+        path = np.full(width, height // 2, dtype=np.int64)
 
-            for step in scores:
-                prev = path_y[-1]
-                if not first <= prev < last:
-                    break
-                vals = step[prev - first] + torch.randn(candidate_count, generator=image_generator()) * 1e-6
-                vals += vals.std() * penalty
-                path_y.append(max(0, min(H - 1, prev + int(vals.argmin()) - span)))
-                start += 1
+        # Estimate the walk from vertical prefix sums, then check the proposed
+        # transitions together using the original floating-point reductions.
+        padded = np.pad(blurry.numpy(), ((span, span), (0, 0)), mode="edge")
+        prefix = np.zeros((len(padded) + 1, width), dtype=np.float64)
+        np.cumsum(padded, axis=0, out=prefix[1:])
+        pairs = ((prefix[:, :-1] + prefix[:, 1:]) * 0.5).T.copy()
+        lengths = np.abs(offsets.numpy()) + 1
+        lows = span + np.minimum(offsets.numpy(), 0)
+        highs = span + np.maximum(offsets.numpy(), 0) + 1
+        jitter, weights = noise.numpy(), penalty.numpy()
+        first = 0
+        while first < width - 1:
+            stop = min(width - 1, first + 256)
+            for x in range(first, stop):
+                prev = path[x]
+                scores = ((pairs[x, prev + highs] - pairs[x, prev + lows]) / lengths).astype(np.float32) + jitter[x]
+                centered = scores - scores.mean()
+                dispersion = np.sqrt((centered @ centered) / max(1, len(scores) - 1))
+                move = int((scores + dispersion * weights).argmin()) - span
+                path[x + 1] = min(height - 1, max(0, prev + move))
 
-        for i in range(len(path_y) - 1):
-            lo, hi = sorted((path_y[i], path_y[i + 1]))
+            prev_rows = torch.from_numpy(path[first:stop])
+            rows = (prev_rows[:, None] + offsets).clamp(0, height - 1)
+            cols = torch.arange(first, stop)[:, None]
+            left, right = blurry[rows, cols], blurry[rows, cols + 1]
+            exact = torch.empty((stop - first, len(offsets)))
+            for i in range(len(offsets)):
+                sl = slice(min(i, span), max(i, span) + 1)
+                exact[:, i] = (left[:, sl].contiguous().mean(1) + right[:, sl].contiguous().mean(1)) / 2
+            exact += noise[first:stop]
+            exact += exact.std(1, keepdim=True) * penalty
+            correct = (prev_rows + exact.argmin(1) - span).clamp(0, height - 1).numpy()
+            mismatch = np.flatnonzero(correct != path[first + 1 : stop + 1])
+            if mismatch.size:
+                first += int(mismatch[0]) + 1
+                path[first] = correct[mismatch[0]]
+            else:
+                first = stop
+
+        for i, (left_y, right_y) in enumerate(zip(path, path[1:])):
+            lo, hi = sorted((left_y, right_y))
             img[lo - 1 : hi + 2, i] = 0
-
-        return torch.tensor(path_y), img
+        return torch.from_numpy(path), img
 
     def _blur(self, tensor: torch.Tensor, kernel_size: int = 3, sigma: float = 1.0) -> torch.Tensor:
         """
@@ -228,6 +258,14 @@ class SignalExtractor:
         """
         if kernel_size % 2 == 0:
             kernel_size += 1
+        if tensor.dtype == torch.float32 and tensor.device.type == "cpu" and 1 < kernel_size < 2 * min(tensor.shape):
+            # Use the same discrete Gaussian kernel and reflected border as torchvision.
+            half = (kernel_size - 1) / 2
+            axis = torch.linspace(-half, half, kernel_size, dtype=tensor.dtype)
+            weights = torch.exp(-0.5 * (axis / sigma).square())
+            weights /= weights.sum()
+            kernel = torch.outer(weights, weights).numpy()
+            return torch.from_numpy(cv2.filter2D(tensor.numpy(), -1, kernel, borderType=cv2.BORDER_REFLECT_101))
         blurred_tensor: torch.Tensor = (
             torchvision.transforms.functional.gaussian_blur(
                 tensor[None, None], [kernel_size, kernel_size], [sigma, sigma]
@@ -238,14 +276,12 @@ class SignalExtractor:
         return blurred_tensor
 
     def _autodetect_num_peaks(self, fmap: torch.Tensor) -> int:
-        logits = torch.log(1 - fmap.clamp(1e-6, 1 - 1e-6)) / torch.log(fmap.clamp(1e-6, 1 - 1e-6))
+        clamped = fmap.clamp(1e-6, 1 - 1e-6)
+        logits = torch.log(1 - clamped) / torch.log(clamped)
         logits = self._blur(logits)
         probs_raw = torch.softmax(logits, dim=0)
-        probs = (probs_raw - 1.1 / probs_raw.shape[0]).clamp(0)
-
-        zero_mask = probs == 0
-        nonzero_mask = ~zero_mask
-        lines = zero_mask[1:] & nonzero_mask[:-1]
+        zero_mask = probs_raw <= 1.1 / probs_raw.shape[0]
+        lines = zero_mask[1:] & ~zero_mask[:-1]
         line_counts = lines.sum(0)
         value_counts = torch.bincount(line_counts)
         most_common_value = int(value_counts.argmax().item())
