@@ -10,6 +10,8 @@ from skimage.feature import peak_local_max
 from sklearn.neighbors import NearestNeighbors
 from torch_tps import ThinPlateSpline
 
+from src.seed import image_generator
+
 DEBUG = False
 # If DEBUG is True, specify a directory to save plots
 DEBUG_OUTPUT_DIR = "sandbox"
@@ -437,7 +439,7 @@ class Dewarper(torch.nn.Module):
         tps = ThinPlateSpline(1, device=device, order=1)
 
         # Sample control points for TPS if there are too many
-        indices = torch.randperm(input_ctrl.shape[0])[: self.max_num_warp_points]
+        indices = torch.randperm(input_ctrl.shape[0], generator=image_generator())[: self.max_num_warp_points]
         sampled_input_ctrl = input_ctrl[indices]
         sampled_output_ctrl = output_ctrl[indices]
         try:

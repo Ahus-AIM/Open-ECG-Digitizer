@@ -9,6 +9,7 @@ from torch import Tensor
 from torch.nn import Module
 from yacs.config import CfgNode as CN
 
+from src.seed import DEFAULT_INFERENCE_SEED, image_random_stream, seed_inference
 from src.utils import import_class_from_path
 
 
@@ -39,6 +40,7 @@ class InferenceWrapper(Module):
         enable_timing: bool = False,
         minimum_image_size: int = 512,
         apply_dewarping: bool = True,
+        seed: int | None = DEFAULT_INFERENCE_SEED,
     ) -> None:
         """Inference wrapper for ECG pipeline.
 
@@ -54,8 +56,11 @@ class InferenceWrapper(Module):
             enable_timing: Whether to print timings.
             minimum_image_size: Minimum allowed image size.
             apply_dewarping: Whether to apply dewarping (perspective correction is still performed regardless).
+            seed: Seed for Python, NumPy and PyTorch. Pass None to use the caller's RNG state.
         """
         super().__init__()
+        seed_inference(seed)
+        self.seed = seed
         self.config = config
         self.device = device
         self.resample_size = resample_size
@@ -90,6 +95,12 @@ class InferenceWrapper(Module):
         Returns:
             Dictionary with processed outputs and intermediate results.
         """
+        with image_random_stream(self.seed):
+            return self._digitize_image(image, layout_should_include_substring)
+
+    def _digitize_image(
+        self, image: Tensor, layout_should_include_substring: None | str
+    ) -> dict[str, Tensor | str | float | None | dict[str, Any]]:
         self._check_image_dimensions(image)
         image = self.min_max_normalize(image)
         image = image.to(self.device)
