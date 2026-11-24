@@ -2,13 +2,9 @@ import os
 from typing import Any, cast
 
 import matplotlib.pyplot as plt
-import networkx as nx
 import numpy as np
 import numpy.typing as npt
 import torch
-from skimage.feature import peak_local_max
-from sklearn.neighbors import NearestNeighbors
-from torch_tps import ThinPlateSpline
 
 from src.seed import image_generator
 
@@ -167,6 +163,8 @@ class Dewarper(torch.nn.Module):
         self.channel = grid_probabilities_conv.sum(1).squeeze().cpu()  # Move to CPU for peak_local_max
         self.channel /= self.channel.max()
 
+        from skimage.feature import peak_local_max
+
         self.local_maxima = peak_local_max(
             self.channel.numpy(),  # peak_local_max requires numpy
             min_distance=int(self.target_grid_size * self.min_peak_distance_factor),
@@ -197,6 +195,9 @@ class Dewarper(torch.nn.Module):
             self.final_local_maxima = np.array([])
             self.final_edges = []
             return
+
+        import networkx as nx
+        from sklearn.neighbors import NearestNeighbors
 
         knn = NearestNeighbors(n_neighbors=self.nn_neighbors, algorithm="ball_tree", p=1)
         knn.fit(self.local_maxima)
@@ -435,6 +436,8 @@ class Dewarper(torch.nn.Module):
 
         height, width = self.grid_probabilities.shape
         size = torch.tensor([height, width], dtype=torch.float32).to(device)
+
+        from torch_tps import ThinPlateSpline
 
         tps = ThinPlateSpline(1, device=device, order=1)
 

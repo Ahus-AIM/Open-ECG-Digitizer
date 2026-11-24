@@ -54,11 +54,11 @@ class SignalExtractor:
         self.num_peaks = self._autodetect_num_peaks(fmap)
         lines_list = [ln for ln in lines_list if (~torch.isnan(ln)).sum() > self.min_line_width]
         if len(lines_list) == 0:
-            return torch.empty((0, feature_map.shape[1]), dtype=torch.float32)
+            return torch.empty((0, fmap.shape[1]), dtype=torch.float32)
         lines = torch.stack(lines_list, dim=0)
         merged_lines_list, overlaps = self.match_and_merge_lines(lines)
         if len(merged_lines_list) == 0:
-            return torch.empty((0, feature_map.shape[1]), dtype=torch.float32)
+            return torch.empty((0, fmap.shape[1]), dtype=torch.float32)
         merged_lines = torch.stack(merged_lines_list, dim=0)
         if self.num_peaks != len(merged_lines):
             print(
@@ -76,7 +76,7 @@ class SignalExtractor:
 
     def _extract_candidate_lines(
         self, fmap: torch.Tensor
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor], list[tuple[slice, slice, torch.Tensor]]]:
         lab: npt.NDArray[Any] = self._label_regions(fmap)
         zero_mask = lab == 0
         big_offset = lab.max() + 1000  # Just some big number to avoid overlap
@@ -92,7 +92,7 @@ class SignalExtractor:
 
         good: list[torch.Tensor] = []
         rejected: list[torch.Tensor] = []
-        rej_maps: list[torch.Tensor] = []
+        rej_maps: list[tuple[slice, slice, torch.Tensor]] = []
         # A column reduction is independent of all other columns. Pack disjoint
         # (label, column) pairs together while preserving the full reduction
         # shape, dtype and row order of the original masked sums.
@@ -101,17 +101,19 @@ class SignalExtractor:
         if not xs.size:
             return good, rejected, rej_maps
         stride = int(lab.max()) + 1
-        pairs, inverse = np.unique(xs * stride + lab[ys, xs], return_inverse=True)
+        pixel_labels = lab[ys, xs]
+        pairs, inverse = np.unique(xs * stride + pixel_labels, return_inverse=True)
         cols, labels = np.divmod(pairs, stride)
         starts = np.flatnonzero(np.r_[True, cols[1:] != cols[:-1]])
         slots = np.arange(len(cols)) - np.repeat(starts, np.diff(starts, append=len(cols)))
         pixel_slots = slots[inverse]
+        pixel_values = fmap.numpy()[ys, xs]
         centers = torch.empty(len(cols), dtype=fmap.dtype)
         for slot in range(int(slots.max()) + 1):
             pixels = pixel_slots == slot
-            mask = torch.zeros((height, width), dtype=torch.bool)
-            mask[ys[pixels], xs[pixels]] = True
-            line = self._extract_line_from_region(fmap, mask)
+            masked = torch.zeros((height, width), dtype=fmap.dtype)
+            masked.numpy()[ys[pixels], xs[pixels]] = pixel_values[pixels]
+            line = self._column_centers(masked)
             selected = slots == slot
             centers[selected] = line[cols[selected]]
 
@@ -127,15 +129,18 @@ class SignalExtractor:
                 good.append(line)
             else:
                 rejected.append(line)
-                rej_maps.append(fmap * torch.from_numpy(lab == lid))
+                region_rows = ys[pixel_labels == lid]
+                y = slice(int(region_rows.min()), int(region_rows.max()) + 1)
+                x = slice(int(active_cols[0]), int(active_cols[-1]) + 1)
+                rej_maps.append((y, x, fmap[y, x] * torch.from_numpy(lab[y, x] == lid)))
 
         for line in (*good, *rejected):
             line[line < 5] = float("nan")
 
         return good, rejected, rej_maps
 
-    def _refine_fmap_by_removal(self, fmap: torch.Tensor, rej_maps: list[torch.Tensor]) -> None:
-        for i, mask_map in enumerate(rej_maps):
+    def _refine_fmap_by_removal(self, fmap: torch.Tensor, rej_maps: list[tuple[slice, slice, torch.Tensor]]) -> None:
+        for y, x, mask_map in rej_maps:
             ys, xs = torch.where(mask_map > 0)
             if ys.numel() == 0:
                 continue
@@ -143,7 +148,7 @@ class SignalExtractor:
             x0, x1 = int(xs.min().item()), int(xs.max().item())
             cropped: npt.NDArray[Any] = mask_map[y0 : y1 + 1, x0 : x1 + 1].cpu().numpy()
             _, new_img = self._trace_horizontal_path(cropped)
-            region = fmap[y0 : y1 + 1, x0 : x1 + 1]
+            region = fmap[y, x][y0 : y1 + 1, x0 : x1 + 1]
             region[cropped > 0] = new_img[cropped > 0]
 
     def _label_regions(self, fmap: torch.Tensor) -> npt.NDArray[np.int64]:
@@ -157,11 +162,14 @@ class SignalExtractor:
         return output
 
     def _extract_line_from_region(self, fmap: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        pos = torch.arange(fmap.shape[0]).view(-1, 1)
-        masked = torch.where(mask, fmap, torch.zeros_like(fmap))
+        return self._column_centers(torch.where(mask, fmap, torch.zeros_like(fmap)))
+
+    @staticmethod
+    def _column_centers(masked: torch.Tensor) -> torch.Tensor:
+        pos = torch.arange(masked.shape[0]).view(-1, 1)
         masked /= masked.sum(0, keepdim=True).clamp(min=1e-6)
         line = (masked * pos).sum(0)
-        line[line < 1 / fmap.shape[0]] = float("nan")
+        line[line < 1 / masked.shape[0]] = float("nan")
         return line
 
     def _trace_horizontal_path(self, img_arr: npt.NDArray[Any]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -173,25 +181,33 @@ class SignalExtractor:
 
         candidate_count = 2 * self.candidate_span + 1
         penalty = torch.tensor(np.linspace(-1, 1, candidate_count) ** 2, dtype=torch.float32)
-        # The walk depends on its previous row. Precompute only its deterministic
-        # segment means, in bounded column blocks, and draw the jitter in walk order.
-        rows = torch.arange(-self.candidate_span, H + self.candidate_span).clamp(0, H - 1)
-        block_width = max(1, min(128, 65536 // (H * candidate_count)))
-        for start in range(1, W, block_width):
-            stop = min(start + block_width, W)
+        # Most paths stay close to their current row. Compute segment means
+        # for a band ahead of the walk and recenter it if the path leaves it.
+        # Opposite offsets use the same interval viewed from its other end.
+        span = self.candidate_span
+        start = 1
+        while start < W:
+            first = max(0, path_y[-1] - span)
+            last = min(H, path_y[-1] + span + 1)
+            rows = torch.arange(first - span, last + span).clamp(0, H - 1)
+            stop = min(W, start + max(1, min(128, 65536 // ((last - first) * candidate_count))))
             columns = blurry[rows, start - 1 : stop].T.contiguous()
-            scores = torch.empty((stop - start, H, candidate_count), dtype=blurry.dtype)
-            for i, offset in enumerate(range(-self.candidate_span, self.candidate_span + 1)):
-                first = self.candidate_span + min(offset, 0)
-                windows = columns.unfold(1, abs(offset) + 1, 1)[:, first : first + H]
+            scores = torch.empty((stop - start, last - first, candidate_count), dtype=blurry.dtype)
+            for offset in range(span + 1):
+                windows = columns.unfold(1, offset + 1, 1)[:, span - offset : span + last - first]
                 means = windows.contiguous().mean(dim=-1)
-                scores[:, :, i] = (means[:-1] + means[1:]) / 2
+                both = (means[:-1] + means[1:]) / 2
+                scores[:, :, span - offset] = both[:, : last - first]
+                scores[:, :, span + offset] = both[:, offset:]
 
             for step in scores:
                 prev = path_y[-1]
-                vals = step[prev] + torch.randn(candidate_count, generator=image_generator()) * 1e-6
+                if not first <= prev < last:
+                    break
+                vals = step[prev - first] + torch.randn(candidate_count, generator=image_generator()) * 1e-6
                 vals += vals.std() * penalty
-                path_y.append(max(0, min(H - 1, prev + int(vals.argmin()) - self.candidate_span)))
+                path_y.append(max(0, min(H - 1, prev + int(vals.argmin()) - span)))
+                start += 1
 
         for i in range(len(path_y) - 1):
             lo, hi = sorted((path_y[i], path_y[i + 1]))
@@ -212,9 +228,13 @@ class SignalExtractor:
         """
         if kernel_size % 2 == 0:
             kernel_size += 1
-        blurred_tensor: torch.Tensor = torchvision.transforms.functional.gaussian_blur(
-            tensor[None, None], [kernel_size, kernel_size], [sigma, sigma]
-        ).squeeze(0).squeeze(0)
+        blurred_tensor: torch.Tensor = (
+            torchvision.transforms.functional.gaussian_blur(
+                tensor[None, None], [kernel_size, kernel_size], [sigma, sigma]
+            )
+            .squeeze(0)
+            .squeeze(0)
+        )
         return blurred_tensor
 
     def _autodetect_num_peaks(self, fmap: torch.Tensor) -> int:

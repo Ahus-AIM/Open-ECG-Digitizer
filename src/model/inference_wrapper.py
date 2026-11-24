@@ -9,8 +9,8 @@ from torch import Tensor
 from torch.nn import Module
 from yacs.config import CfgNode as CN
 
+from src.config.default import import_class_from_path
 from src.seed import DEFAULT_INFERENCE_SEED, image_random_stream, seed_inference
-from src.utils import import_class_from_path
 
 
 @contextmanager
@@ -101,23 +101,8 @@ class InferenceWrapper(Module):
     def _digitize_image(
         self, image: Tensor, layout_should_include_substring: None | str
     ) -> dict[str, Tensor | str | float | None | dict[str, Any]]:
-        self._check_image_dimensions(image)
-        image = self.min_max_normalize(image)
-        image = image.to(self.device)
-
-        self.times = {}
-        image = self._resample_image(image)
-
-        signal_prob, grid_prob, text_prob = self._get_feature_maps(image)
-
-        with timed_section("Perspective detection", self.times):
-            alignment_params = self.perspective_detector(grid_prob)
-
-        with timed_section("Cropping", self.times):
-            source_points = self.cropper(signal_prob, alignment_params)
-
-        aligned_image, aligned_signal_prob, aligned_grid_prob, aligned_text_prob = self._align_feature_maps(
-            image, signal_prob, grid_prob, text_prob, source_points
+        image, source_points, aligned_image, aligned_signal_prob, aligned_grid_prob, aligned_text_prob = (
+            self._aligned_maps(image)
         )
 
         with timed_section("Pixel size search", self.times):
@@ -140,14 +125,7 @@ class InferenceWrapper(Module):
             avg_pixel_per_mm,
             layout_should_include_substring=layout_should_include_substring,
         )
-        try:
-            layout_str = layout["layout"]
-            layout_is_flipped = str(layout["flip"])
-            layout_cost = layout.get("cost", 1.0)
-        except KeyError:
-            layout_str = "Unknown layout"
-            layout_is_flipped = "False"
-            layout_cost = 1.0
+        layout_str, layout_is_flipped, layout_cost = self.layout_summary(layout)
 
         return {
             "layout_name": layout_str,
@@ -172,6 +150,41 @@ class InferenceWrapper(Module):
             },
             "source_points": source_points.cpu(),
         }
+
+    @staticmethod
+    def layout_summary(layout: dict[str, Any]) -> tuple[str, str, float]:
+        try:
+            layout_str = layout["layout"]
+            layout_is_flipped = str(layout["flip"])
+            layout_cost = layout.get("cost", 1.0)
+        except KeyError:
+            layout_str = "Unknown layout"
+            layout_is_flipped = "False"
+            layout_cost = 1.0
+
+        return layout_str, layout_is_flipped, layout_cost
+
+    def _aligned_maps(self, image: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        self._check_image_dimensions(image)
+        image = self.min_max_normalize(image)
+        image = image.to(self.device)
+
+        self.times = {}
+        image = self._resample_image(image)
+
+        signal_prob, grid_prob, text_prob = self._get_feature_maps(image)
+
+        with timed_section("Perspective detection", self.times):
+            alignment_params = self.perspective_detector(grid_prob)
+
+        with timed_section("Cropping", self.times):
+            source_points = self.cropper(signal_prob, alignment_params)
+
+        aligned_image, aligned_signal_prob, aligned_grid_prob, aligned_text_prob = self._align_feature_maps(
+            image, signal_prob, grid_prob, text_prob, source_points
+        )
+
+        return image, source_points, aligned_image, aligned_signal_prob, aligned_grid_prob, aligned_text_prob
 
     def _align_feature_maps(
         self,
@@ -341,20 +354,25 @@ class InferenceWrapper(Module):
         return dewarper
 
     def _load_layout_identifier(self) -> Any:
+        from src.model.lead_identifier import LeadIdentifier
+
         layouts = yaml.safe_load(open(self.config.LAYOUT_IDENTIFIER.config_path, "r"))
         unet_cfg = yaml.safe_load(open(self.config.LAYOUT_IDENTIFIER.unet_config_path, "r"))
         unet_class = import_class_from_path(unet_cfg["MODEL"]["class_path"])
         unet: torch.nn.Module = unet_class(**unet_cfg["MODEL"]["KWARGS"])
-        checkpoint = torch.load(self.config.LAYOUT_IDENTIFIER.unet_weight_path, map_location=self.device)
+        checkpoint = torch.load(self.config.LAYOUT_IDENTIFIER.unet_weight_path, map_location="cpu")
         checkpoint = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}
         unet.load_state_dict(checkpoint)
         unet.eval()
 
         identifier_class = import_class_from_path(self.config.LAYOUT_IDENTIFIER.class_path)
+        kwargs = dict(self.config.LAYOUT_IDENTIFIER.KWARGS)
+        if identifier_class is LeadIdentifier:
+            kwargs["device"] = self.device
         identifier: Any = identifier_class(
             layouts=layouts,
             unet=unet,
-            **self.config.LAYOUT_IDENTIFIER.KWARGS,
+            **kwargs,
         )
         return identifier
 
@@ -364,7 +382,7 @@ class InferenceWrapper(Module):
         Args:
             segmentation_model: The model to load weights into.
         """
-        checkpoint = torch.load(self.config.SEGMENTATION_MODEL.weight_path, weights_only=True, map_location=self.device)
+        checkpoint = torch.load(self.config.SEGMENTATION_MODEL.weight_path, weights_only=True, map_location="cpu")
         if isinstance(checkpoint, tuple):
             checkpoint = checkpoint[0]
         checkpoint = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.items()}

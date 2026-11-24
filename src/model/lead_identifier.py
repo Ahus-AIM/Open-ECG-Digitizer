@@ -257,11 +257,20 @@ class LeadIdentifier:
         if lead_names is None:
             lead_names = self.LEAD_CHANNEL_ORDER
         _, C, H, W = probs_tensor.shape
-        arr: NDArray[Any] = probs_tensor[0].cpu().numpy()
+        channels = probs_tensor[0]
+        if channels.is_cuda and channels.is_contiguous() and len(lead_names) <= C:
+            # Thresholding usually leaves only a few lead channels. Keep the
+            # original dense NumPy reduction for every channel with any mass.
+            active = channels[: len(lead_names)].any(dim=(1, 2)).nonzero().flatten()
+            names = [lead_names[i] for i in active.tolist()]
+            channels = channels.index_select(0, active)
+        else:
+            names = lead_names
+        arr: NDArray[Any] = channels.cpu().numpy()
         pts: list[tuple[str, float, float]] = []
         xs = np.arange(W, dtype=np.float64)[None, :]
         ys = np.arange(H, dtype=np.float64)[:, None]
-        for i, name in enumerate(lead_names):
+        for i, name in enumerate(names):
             channel: NDArray[Any] = arr[i]
             mass = np.sum(channel)
             if mass == 0:
@@ -448,6 +457,15 @@ class LeadIdentifier:
                 should_check_flipped = True
         return layouts, should_check_flipped
 
+    def detect_leads(self, feature_map: torch.Tensor, threshold: float = 0.8) -> list[tuple[str, float, float]]:
+        self.unet.eval()
+        with torch.no_grad():
+            logits: torch.Tensor = self.unet(feature_map.to(self.device))  # [1,13,H,W]
+            probs: torch.Tensor = torch.softmax(logits, dim=1)[:, :12]  # [1,12,H,W]
+            probs[:, 0] = 0  # Ignore the position of the "I" lead as it is particularly prone to false positives.
+        probs[probs < threshold] = 0
+        return self._extract_lead_points(probs, self.LEAD_CHANNEL_ORDER)
+
     def __call__(
         self,
         lines: torch.Tensor,
@@ -456,6 +474,17 @@ class LeadIdentifier:
         threshold: float = 0.8,
         mv_per_mm: float = 0.1,
         layout_should_include_substring: Optional[str] = None,
+    ) -> dict[str, Any]:
+        detected = self.detect_leads(feature_map, threshold)
+        return self.identify_lines(lines, avg_pixel_per_mm, detected, mv_per_mm, layout_should_include_substring)
+
+    def identify_lines(
+        self,
+        lines: torch.Tensor,
+        avg_pixel_per_mm: float,
+        detected: list[tuple[str, float, float]],
+        mv_per_mm: float = 0.1,
+        layout_should_include_substring: str | None = None,
     ) -> dict[str, Any]:
         lines = self._merge_nonoverlapping_lines(lines)
         lines = -self.normalize(lines, avg_pixel_per_mm, mv_per_mm)
@@ -469,13 +498,6 @@ class LeadIdentifier:
         # layouts, check_flipped = self._restrict_cabrera_layouts_if_needed(lines, layouts, self.possibly_flipped)
 
         rows_in_layout: int = lines.shape[0]
-        self.unet.eval()
-        with torch.no_grad():
-            logits: torch.Tensor = self.unet(feature_map.to(self.device))  # [1,13,H,W]
-            probs: torch.Tensor = torch.softmax(logits, dim=1)[:, :12]  # [1,12,H,W]
-            probs[:, 0] = 0  # Ignore the position of the "I" lead as it is particularly prone to false positives.
-        probs[probs < threshold] = 0
-        detected: list[tuple[str, float, float]] = self._extract_lead_points(probs, self.LEAD_CHANNEL_ORDER)
         if len(detected) <= 2:
             match: dict[str, Any] = {"cost": float("inf")}
             canonical_lines: Optional[torch.Tensor] = None

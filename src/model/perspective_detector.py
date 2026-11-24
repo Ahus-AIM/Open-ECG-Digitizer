@@ -54,11 +54,16 @@ class PerspectiveDetector:
         rhos_idxs = rhos_idxs.clamp(0, len(rhos) - 1)
 
         accumulator = torch.zeros(num_rhos * num_thetas, dtype=torch.int32, device=device)
-        idxs_flat = rhos_idxs * num_thetas + torch.arange(num_thetas, device=device).reshape(1, -1)
+        index_dtype = (
+            torch.int32
+            if device.type == "cuda" and accumulator.numel() <= torch.iinfo(torch.int32).max
+            else torch.int64
+        )
+        idxs_flat = rhos_idxs.to(index_dtype) * num_thetas + torch.arange(num_thetas, device=device, dtype=index_dtype)
 
         idxs_flat = idxs_flat.flatten()
 
-        accumulator.index_add_(0, idxs_flat, torch.ones_like(idxs_flat, dtype=torch.int32))
+        accumulator.index_add_(0, idxs_flat, accumulator.new_ones(1).expand_as(idxs_flat))
         accumulator = accumulator.view(len(rhos), len(thetas))
 
         # Remove most of the negative rhos
@@ -75,7 +80,7 @@ class PerspectiveDetector:
         return accumulator.float(), rhos
 
     def get_line_values(
-        self, accumulator: torch.Tensor, thetas: torch.Tensor, rhos: torch.Tensor
+        self, accumulator: torch.Tensor, thetas: torch.Tensor, rhos: torch.Tensor, columns: torch.Tensor | None = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         r"""Extract the values along a line in the Hough accumulator, parameterized by two thetas: one at the top and
         one at the bottom. The thetas are chosen to maximize the variance along the line and correspond to the
@@ -89,13 +94,16 @@ class PerspectiveDetector:
             Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: The values along the line, the corresponding thetas,
                 and the radial distances.
         """
-        variance = self.calculate_line_variances(accumulator)
-        max_idx_top = variance.argmax() // (self.num_thetas // 2)
-        max_idx_bottom = variance.argmax() % (self.num_thetas // 2)
+        variance = self.calculate_line_variances(accumulator, columns)
+        peak = variance.argmax()
+        max_idx_top = peak // (self.num_thetas // 2)
+        max_idx_bottom = peak % (self.num_thetas // 2)
 
         return max_idx_top, max_idx_bottom
 
-    def get_theta_lims(self, accumulator: torch.Tensor, thetas: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def get_theta_lims(
+        self, accumulator: torch.Tensor, thetas: torch.Tensor, columns: torch.Tensor | None = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         r"""
         Computes the variance along lines in the Hough accumulator, parameterized by two thetas: one at the top and
         one at the bottom. The thetas are chosen to maximize the variance along the line and correspond to the
@@ -108,9 +116,10 @@ class PerspectiveDetector:
         Returns:
             Tuple[torch.Tensor, torch.Tensor]: The thetas corresponding to the top and bottom of the accumulator.
         """
-        variance = self.calculate_line_variances(accumulator)
-        max_idx_top = variance.argmax() // (self.num_thetas // 2)
-        max_idx_bottom = variance.argmax() % (self.num_thetas // 2)
+        variance = self.calculate_line_variances(accumulator, columns)
+        peak = variance.argmax()
+        max_idx_top = peak // (self.num_thetas // 2)
+        max_idx_bottom = peak % (self.num_thetas // 2)
 
         theta_top = thetas[max_idx_top]  # index at top of accumulator
         theta_bottom = thetas[max_idx_bottom]  # index at bottom of accumulator
@@ -146,15 +155,17 @@ class PerspectiveDetector:
             plt.savefig("sandbox/accumulator1.png")
             plt.show()
 
+        columns = self._line_columns(accumulator[:, : self.num_thetas // 2])
         (
             theta_top_horizontal,
             theta_bottom_horizontal,
-        ) = self.get_theta_lims(accumulator[:, : self.num_thetas // 2], thetas[: self.num_thetas // 2])
+        ) = self.get_theta_lims(accumulator[:, : self.num_thetas // 2], thetas[: self.num_thetas // 2], columns)
         (
             theta_top_vertical,
             theta_bottom_vertical,
-        ) = self.get_theta_lims(accumulator[:, self.num_thetas // 2 :], thetas[self.num_thetas // 2 :])
+        ) = self.get_theta_lims(accumulator[:, self.num_thetas // 2 :], thetas[self.num_thetas // 2 :], columns)
 
+        del columns  # Release the sample grid before allocating the second Hough accumulator.
         theta_min_horizontal = torch.min(theta_top_horizontal, theta_bottom_horizontal)
         theta_max_horizontal = torch.max(theta_top_horizontal, theta_bottom_horizontal)
         theta_min_vertical = torch.min(theta_top_vertical, theta_bottom_vertical)
@@ -187,11 +198,12 @@ class PerspectiveDetector:
             plt.savefig("sandbox/accumulator2.png")
             plt.show()
 
+        columns = self._line_columns(accumulator[:, : self.num_thetas // 2])
         idx_top_horizontal, idx_bottom_horizontal = self.get_line_values(
-            accumulator[:, : self.num_thetas // 2], thetas[: self.num_thetas // 2], rhos
+            accumulator[:, : self.num_thetas // 2], thetas[: self.num_thetas // 2], rhos, columns
         )
         idx_top_vertical, idx_bottom_vertical = self.get_line_values(
-            accumulator[:, self.num_thetas // 2 :], thetas[self.num_thetas // 2 :], rhos
+            accumulator[:, self.num_thetas // 2 :], thetas[self.num_thetas // 2 :], rhos, columns
         )
 
         params = {
@@ -271,7 +283,7 @@ class PerspectiveDetector:
         """
         return image.squeeze() > self.quantile(image, 0.98)
 
-    def calculate_line_variances(self, accumulator: torch.Tensor) -> torch.Tensor:
+    def calculate_line_variances(self, accumulator: torch.Tensor, columns: torch.Tensor | None = None) -> torch.Tensor:
         """
         Calculate variance along the derivative for all lines from top to bottom of an image.
 
@@ -283,6 +295,12 @@ class PerspectiveDetector:
         Returns:
             torch.Tensor: The variance tensor with shape [W, W].
         """
+        if columns is None:
+            columns = self._line_columns(accumulator)
+        samples = accumulator.gather(1, columns.flatten(1)).view_as(columns)
+        return torch.var(samples, dim=0)
+
+    def _line_columns(self, accumulator: torch.Tensor) -> torch.Tensor:
         H, W = accumulator.shape
         x_start, x_end = torch.meshgrid(torch.arange(W), torch.arange(W), indexing="ij")
         slopes = torch.where(x_start != x_end, H / (x_end - x_start).float(), torch.tensor(float("inf")))
@@ -293,8 +311,4 @@ class PerspectiveDetector:
         x_coords = torch.where(
             slopes == float("inf"), x_start.float(), x_start + y_coords / slopes  # Diagonal entries: x_start == x_end
         )
-        x_coords_clamped = x_coords.round_().clamp_(0, W - 1).long()
-        del x_coords
-        sampled_values = accumulator[y_coords.long(), x_coords_clamped]
-        variances = torch.var(sampled_values, dim=0)
-        return variances
+        return x_coords.round_().clamp_(0, W - 1).long()

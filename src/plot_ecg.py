@@ -6,6 +6,7 @@ import numpy as np
 import numpy.typing as npt
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
+from matplotlib.layout_engine import TightLayoutEngine
 from matplotlib.patches import Rectangle
 
 
@@ -46,7 +47,11 @@ class ECGPlot:
         if self.lines is not None:
             self.lines -= np.linspace(0, 24_000, num=self.lines.shape[0])[:, None]  # 2 uV offset per lead
             axs[1, 1].plot(self.lines.T, linewidth=0.5)
-        fig.tight_layout()
+        if fig.get_layout_engine() is None:
+            # Execute the one-shot layout directly to avoid rasterizing twice.
+            TightLayoutEngine().execute(fig)
+        else:
+            fig.tight_layout()
         fig.suptitle(self.title, fontsize=16)
         fig.savefig(output_basepath + ".png", dpi=200)
         # Figures contain cycles that retain the raster buffers between jobs.
