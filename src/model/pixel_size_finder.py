@@ -59,28 +59,24 @@ class PixelSizeFinder(torch.nn.Module):
         Returns:
             Tuple[float, float]: mm/pixel in x and y direction, respectively.
         """
+        return self.from_projections(*self.projections(image))
+
+    def projections(self, image: torch.Tensor) -> tuple[npt.NDArray[Any], npt.NDArray[Any]]:
         image = image.squeeze()
         assert image.ndim == 2, "Image must be 2D (H, W) tensor."
 
-        estimate_x = self._mm_per_pixel_y(image.swapaxes(0, 1))
-        aspect = image.shape[1] / image.shape[0]
-        estimate_y = self._mm_per_pixel_y(image, aspect)
+        def project(axis: torch.Tensor) -> npt.NDArray[Any]:
+            profile = axis.sum(dim=-1)
+            return (profile - profile.mean()).cpu().numpy()
 
-        return estimate_x, estimate_y
+        return project(image.T), project(image)
 
-    def _mm_per_pixel_y(self, image: torch.Tensor, aspect: float = 1) -> Scalar:
-        pxls_between_lines = self._find_pxls_between_horizontal_grid_lines(image, aspect)
+    def from_projections(self, x: npt.NDArray[Any], y: npt.NDArray[Any]) -> Tuple[Scalar, Scalar]:
+        def spacing(profile: npt.NDArray[Any], aspect: float) -> Scalar:
+            correlation = torch.from_numpy(np.correlate(profile, profile, mode="full"))
+            return self.mm_between_grid_lines / self._zoom_grid_search_min_distance(correlation, aspect)
 
-        return self.mm_between_grid_lines / pxls_between_lines
-
-    def _find_pxls_between_horizontal_grid_lines(self, image: torch.Tensor, aspect: float) -> Scalar:
-        col_sum = image.sum(dim=-1)
-        col_sum = col_sum - col_sum.mean()
-        autocorrelation = np.correlate(col_sum.cpu().numpy(), col_sum.cpu().numpy(), mode="full")
-
-        pxls_between_lines = self._zoom_grid_search_min_distance(torch.tensor(autocorrelation), aspect)
-
-        return pxls_between_lines
+        return spacing(x, 1), spacing(y, len(x) / len(y))
 
     def _zoom_grid_search_min_distance(self, autocorrelation: torch.Tensor, aspect: float) -> Scalar:
         """

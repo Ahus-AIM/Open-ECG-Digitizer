@@ -22,6 +22,7 @@ def seed_inference(seed: int | None) -> None:
         np.random.seed(seed)
         torch.manual_seed(seed)  # Seeds both CPU and CUDA generators.
 
+
 # One CPU generator serves all the sampling and tie-breaking for a single ECG.
 _image_generator: ContextVar[torch.Generator | None] = ContextVar("ecg_generator", default=None)
 
@@ -31,10 +32,14 @@ def image_generator() -> torch.Generator | None:
 
 
 @contextmanager
-def image_random_stream(seed: int | None) -> Iterator[None]:
+def image_random_stream(seed: int | torch.Tensor | None) -> Iterator[None]:
     import torch
 
-    generator = None if seed is None else torch.Generator().manual_seed(seed)
+    generator: torch.Generator | None
+    if isinstance(seed, torch.Tensor):
+        generator = torch.Generator().set_state(seed)
+    else:
+        generator = None if seed is None else torch.Generator().manual_seed(seed)
     token = _image_generator.set(generator)
     try:
         yield

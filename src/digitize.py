@@ -6,14 +6,14 @@ import os
 import random
 import warnings
 from collections import deque
-from concurrent.futures import Future, ProcessPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import ExitStack
 from typing import TYPE_CHECKING, Any
 
 from tqdm import tqdm
 from yacs.config import CfgNode as CN
 
-from src.config.default import get_cfg
+from src.config.default import find_config_path, get_cfg, import_class_from_path
 from src.seed import DEFAULT_INFERENCE_SEED, seed_inference
 
 if TYPE_CHECKING:
@@ -148,8 +148,7 @@ def save_outputs(got_values: dict[str, Any], output_basepath: str, save_mode: st
     save_matching_cost(got_values, output_basepath)
 
 
-def _infer_file(file_path: str, config: CN, inference_wrapper: Any) -> dict[str, Any]:
-    image = decode_and_prepare_image(file_path)
+def _layout_hint(file_path: str, config: CN) -> str | None:
     layout_should_include_substring: str | None = None
     if config.DATA.get("layout_should_include_substring") is not None:
         if "limb" in str(file_path):
@@ -157,7 +156,12 @@ def _infer_file(file_path: str, config: CN, inference_wrapper: Any) -> dict[str,
         elif "precordial" in str(file_path):
             layout_should_include_substring = "precordial"
 
-    values: dict[str, Any] = inference_wrapper(image, layout_should_include_substring=layout_should_include_substring)
+    return layout_should_include_substring
+
+
+def _infer_file(file_path: str, config: CN, inference_wrapper: Any) -> dict[str, Any]:
+    image = decode_and_prepare_image(file_path)
+    values: dict[str, Any] = inference_wrapper(image, layout_should_include_substring=_layout_hint(file_path, config))
     return values
 
 
@@ -174,10 +178,56 @@ def process_one_file(file_path: str, config: CN, inference_wrapper: Any, save_mo
         save_outputs(got_values, _output_basepath(file_path, config), save_mode)
 
 
-def main(config: CN, seed: int | None = DEFAULT_INFERENCE_SEED, plot_workers: int = 0) -> None:
-    # Import the inference stack only in the process that owns the models.
-    from src.utils import import_class_from_path
+def _run_signal_batch(config: CN, paths: list[str], model: Any, workers: int, pool: ProcessPoolExecutor) -> int:
+    from src.model.signal_batch import extract_record, finish_record, prepare_record
 
+    def save_record(path: str, task: Future[Any], detected: list[tuple[str, float, float]]) -> int:
+        try:
+            result = finish_record(model, task.result(), detected, _layout_hint(path, config))
+            save_outputs(result, _output_basepath(path, config), "timeseries_only")
+        except Exception as e:
+            print(f"Error processing {path}: {e}")
+            return 1
+        return 0
+
+    # A single writer commits signals and metadata in input order, including
+    # when two inputs share an output filename. Bound the number of live maps.
+    failed = 0
+    pending: deque[Future[int]] = deque()
+    with ThreadPoolExecutor(1) as writer:
+        for path in tqdm(paths):
+            print(f"Processing file: {path}")
+            try:
+                inputs, detected = prepare_record(model, decode_and_prepare_image(path))
+                task = pool.submit(extract_record, model.signal_extractor, model.pixel_size_finder, inputs)
+                pending.append(writer.submit(save_record, path, task, detected))
+            except Exception as e:
+                print(f"Error processing {path}: {e}")
+                failed += 1
+            if len(pending) >= 2 * workers:
+                failed += pending.popleft().result()
+        return failed + sum(future.result() for future in pending)
+
+
+def main(config: CN, seed: int | None = DEFAULT_INFERENCE_SEED, plot_workers: int = 0, signal_workers: int = 0) -> int:
+    """Digitize the selected images and return the number of failed files."""
+    with ExitStack() as stack:
+        pool = None
+        if config.DATA.get("save_mode") == "timeseries_only" and signal_workers > 1 and config.DATA.get("output_path"):
+            method = "forkserver" if "forkserver" in multiprocessing.get_all_start_methods() else "spawn"
+            pool = stack.enter_context(
+                ProcessPoolExecutor(signal_workers, mp_context=multiprocessing.get_context(method))
+            )
+            # Forkserver startup imports the CPU stack. Overlap that with loading
+            # PyTorch and the network weights in the GPU process.
+            starter = stack.enter_context(ThreadPoolExecutor(1))
+            starter.submit(pool.submit, os.getpid)
+        return _main(config, seed, plot_workers, signal_workers, pool)
+
+
+def _main(
+    config: CN, seed: int | None, plot_workers: int, signal_workers: int, signal_pool: ProcessPoolExecutor | None
+) -> int:
     from src.model.inference_wrapper import InferenceWrapper
 
     inference_wrapper_class = import_class_from_path(config.MODEL.class_path)
@@ -196,16 +246,24 @@ def main(config: CN, seed: int | None = DEFAULT_INFERENCE_SEED, plot_workers: in
         clear_and_prepare_output_dir(config)
 
     paths = [p for p in file_paths if not include_list or any(pattern in p for pattern in include_list)]
+    if signal_pool is not None and len(paths) > 1:
+        from src.model.signal_batch import supports_signal_batch
+
+        if supports_signal_batch(inference_wrapper):
+            return _run_signal_batch(config, paths, inference_wrapper, min(signal_workers, len(paths)), signal_pool)
     plot_workers = min(plot_workers, len(paths))
     pending: deque[tuple[str, str, Future[None], str]] = deque()
+    failed = 0
 
     def finish_oldest() -> None:
+        nonlocal failed
         path, base, future, row = pending.popleft()
         try:
             future.result()
             _append_metadata(base, row)
         except Exception as e:
             print(f"Error processing {path}: {e}")
+            failed += 1
 
     with ExitStack() as stack:
         pool = None
@@ -231,8 +289,10 @@ def main(config: CN, seed: int | None = DEFAULT_INFERENCE_SEED, plot_workers: in
                 pending.append((file_path, base, future, _metadata_row(values, base)))
             except Exception as e:
                 print(f"Error processing {file_path}: {e}")
+                failed += 1
         while pending:
             finish_oldest()
+    return failed
 
 
 if __name__ == "__main__":
@@ -240,7 +300,7 @@ if __name__ == "__main__":
     # transparent huge pages for them can stall concurrent writers in Linux
     # memory compaction. Set this before importing NumPy in the CLI and workers.
     os.environ.setdefault("NUMPY_MADVISE_HUGEPAGE", "0")
-    from src.utils import find_config_path
+    os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 
     parser = argparse.ArgumentParser(description="Digitize ECGs and save output.")
     parser.add_argument(
@@ -248,6 +308,12 @@ if __name__ == "__main__":
         type=int,
         default=min(6, os.cpu_count() or 1),
         help="CPU processes for PNG export (default: up to 6). Use 0 for in-process export.",
+    )
+    parser.add_argument(
+        "--signal-workers",
+        type=int,
+        default=min(4, os.cpu_count() or 1),
+        help="CPU processes for signal-only tracing (default: up to 4). Use 0 for serial inference.",
     )
     parser.add_argument("--seed", type=int, default=DEFAULT_INFERENCE_SEED, help="Inference seed (default: 42).")
     parser.add_argument(
@@ -291,4 +357,11 @@ if __name__ == "__main__":
         if kv_list:
             cfg.merge_from_list(kv_list)
 
-    main(cfg, seed=args.seed, plot_workers=args.plot_workers)
+    if (
+        cfg.DATA.get("save_mode") == "timeseries_only"
+        and args.signal_workers > 1
+        and "forkserver" in multiprocessing.get_all_start_methods()
+    ):
+        multiprocessing.set_forkserver_preload(["src.model.signal_batch"])
+    failed = main(cfg, seed=args.seed, plot_workers=args.plot_workers, signal_workers=args.signal_workers)
+    raise SystemExit(int(failed > 0))

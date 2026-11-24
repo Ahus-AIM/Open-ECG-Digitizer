@@ -1,4 +1,3 @@
-import importlib
 import math
 import os
 from collections import defaultdict
@@ -12,6 +11,11 @@ from ray.tune import Stopper
 from torch import nn
 from torch.utils.data import DataLoader
 from yacs.config import CfgNode as CN
+
+from src.config import default as config_defaults
+
+find_config_path = config_defaults.find_config_path
+import_class_from_path = config_defaults.import_class_from_path
 
 
 class EarlyStopper(Stopper):
@@ -38,24 +42,6 @@ class EarlyStopper(Stopper):
 
     def stop_all(self) -> bool:
         return False
-
-
-def find_config_path(filename: str) -> str:
-    """Tries to find the config file in . or src/config.
-
-    Args:
-        filename: Config file name or path.
-
-    Returns:
-        Absolute path to config.
-    """
-    if os.path.isfile(filename):
-        return filename
-    # Try in src/config/
-    try_path = os.path.join("src", "config", filename)
-    if os.path.isfile(try_path):
-        return try_path
-    raise FileNotFoundError(f"Could not find config file: {filename}")
 
 
 def get_data_loaders(
@@ -85,11 +71,6 @@ def get_data_loaders(
     test_dataloader = DataLoader(test_dataset, **dataloader_config)
 
     return train_dataloader, val_dataloader, test_dataloader
-
-
-def import_class_from_path(path: str) -> Any:
-    module = importlib.import_module(".".join(path.split(".")[:-1]))
-    return getattr(module, path.split(".")[-1])
 
 
 def load_model(config: CN) -> nn.Module:
