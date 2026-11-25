@@ -2,6 +2,33 @@
 
 <!-- version list -->
 
+## v1.9.4 (2026-11-25)
+
+### Bug Fixes
+
+- Make inference sampling deterministic per ECG
+  ([`03f9486`](https://github.com/Ahus-AIM/Open-ECG-Digitizer/commit/03f948644ee973d2e49a50547a57bf2ddfdb8ba1))
+
+### Documentation
+
+- Update docs to reference evaluation data
+  ([`fb36dbb`](https://github.com/Ahus-AIM/Open-ECG-Digitizer/commit/fb36dbbc096c265e13c7d51d983b6abb4e1c0078))
+
+### Performance Improvements
+
+- Accelerate CPU waveform extraction from sparse ECG maps
+  ([`77981ef`](https://github.com/Ahus-AIM/Open-ECG-Digitizer/commit/77981ef3da9982eefc82c12850ae4177c36308fc))
+
+- Accelerate full-size ECG cropping and signal inference
+  ([`f180a28`](https://github.com/Ahus-AIM/Open-ECG-Digitizer/commit/f180a2867c492efbe5012d04f796a64094c1e959))
+
+- Accelerate seeded folder inference and PNG export
+  ([`7131c89`](https://github.com/Ahus-AIM/Open-ECG-Digitizer/commit/7131c895f1524b0f493de4ca756dcc9e32d5a89c))
+
+- Pipeline signal-only ECG batch inference
+  ([`6b8588a`](https://github.com/Ahus-AIM/Open-ECG-Digitizer/commit/6b8588a094a8652e4d03124f3e3fd53dc046ef0e))
+
+
 ## v1.9.3 (2026-06-04)
 
 ### Bug Fixes
